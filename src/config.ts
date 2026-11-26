@@ -14,10 +14,10 @@ export const themeConfig: ThemeConfig = {
     // author name
     author: 'Peter',
     // site url
-    url: 'https://petergong2008.github.io',
+    url: 'https://blog.petergong.de',
     // base path
     // root directory for all pages and assets
-    base: '/blog.me',
+    base: '/',
     // favicon url
     // recommended formats: svg, png or ico
     favicon: '/icons/favicon.svg', // or https://example.com/favicon.svg
