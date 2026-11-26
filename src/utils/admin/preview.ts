@@ -95,7 +95,7 @@ function renderStageDirectiveHtml(title: string, imgs: ParsedDirectiveImage[]): 
     return `<button type="button" class="img-thumb-btn" role="tab" aria-selected="${idx === 0 ? 'true' : 'false'}"${activeAttr} data-stage-thumb="" data-index="${idx}" data-caption="${escapeHtml(caption)}"><img ${buildImgSrcAttr(img.src)} alt="${escapeHtml(img.cleanAlt)}" loading="lazy" /><span class="img-thumb-bar" aria-hidden="true"></span></button>`
   }).join('')
 
-  return `<div class="gallery-container" data-gallery-mode="stage"><div class="img-stage-frame"><img class="img-stage-img" ${buildImgSrcAttr(first.src)} alt="${escapeHtml(first.cleanAlt)}" data-stage-hero="" loading="lazy" /></div><div class="img-stage-meta"><p class="img-stage-caption" data-stage-caption="">${escapeHtml(firstCaption)}</p><span class="img-stage-count" data-stage-count="">1 / ${imgs.length}</span></div><div class="img-thumb-rail" role="tablist" aria-label="画廊缩略图切换">${thumbsHtml}</div></div>`
+  return `<div class="gallery-container" data-gallery-mode="stage"><div class="img-stage-frame"><img class="img-stage-img" ${buildImgSrcAttr(first.src)} alt="${escapeHtml(first.cleanAlt)}" data-stage-hero="true" loading="lazy" /></div><div class="img-stage-meta"><p class="img-stage-caption" data-stage-caption="">${escapeHtml(firstCaption)}</p><span class="img-stage-count" data-stage-count="">1 / ${imgs.length}</span></div><div class="img-thumb-rail" role="tablist" aria-label="画廊缩略图切换">${thumbsHtml}</div></div>`
 }
 
 let activeImageOccurrence = 0
@@ -242,10 +242,10 @@ export async function hydratePreviewImages(
 export function wirePreviewStageGalleries(container: HTMLElement): void {
   const containers = Array.from(container.querySelectorAll<HTMLElement>('.gallery-container[data-gallery-mode="stage"]'))
   for (const gallery of containers) {
-    const hero = gallery.querySelector<HTMLImageElement>('[data-stage-hero]')
-    const captionEl = gallery.querySelector<HTMLElement>('[data-stage-caption]')
-    const countEl = gallery.querySelector<HTMLElement>('[data-stage-count]')
-    const thumbs = Array.from(gallery.querySelectorAll<HTMLButtonElement>('[data-stage-thumb]'))
+    const hero = gallery.querySelector<HTMLImageElement>('[data-stage-hero], .img-stage-frame img')
+    const captionEl = gallery.querySelector<HTMLElement>('[data-stage-caption], .img-stage-caption')
+    const countEl = gallery.querySelector<HTMLElement>('[data-stage-count], .img-stage-count')
+    const thumbs = Array.from(gallery.querySelectorAll<HTMLButtonElement>('[data-stage-thumb], .img-thumb-btn'))
 
     if (!hero || !captionEl || !countEl || thumbs.length === 0) {
       continue
@@ -258,9 +258,13 @@ export function wirePreviewStageGalleries(container: HTMLElement): void {
         if (!nextSrc) {
           return
         }
-        const caption = btn.dataset.caption || thumbImg?.alt || ''
+        const caption = btn.dataset.caption !== undefined ? btn.dataset.caption : (thumbImg?.alt || '')
+        hero.removeAttribute('srcset')
         hero.src = nextSrc
         hero.alt = thumbImg?.alt || caption
+        if (thumbImg?.dataset.relSrc) {
+          hero.dataset.relSrc = thumbImg.dataset.relSrc
+        }
         captionEl.textContent = caption || `图 ${idx + 1}`
         countEl.textContent = `${idx + 1} / ${thumbs.length}`
         thumbs.forEach((other, j) => {

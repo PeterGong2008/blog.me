@@ -109,7 +109,8 @@ export interface AdminMediaUIOptions {
   getBody: () => string
   applyBodyChange: (nextBody: string, opts?: { selectRange?: [number, number] }) => void
   insertAtCursor: (text: string) => void
-  onUploadFiles: (files: FileList | File[]) => Promise<void>
+  onUploadToLibrary: (files: FileList | File[]) => Promise<string[]>
+  onMediaChanged?: () => void
   askConfirm: (title: string, desc: string, confirmText?: string) => Promise<boolean>
   showToast: (message: string, tone?: 'info' | 'success' | 'error') => void
   bodyTextarea: HTMLTextAreaElement
@@ -118,7 +119,7 @@ export interface AdminMediaUIOptions {
 }
 
 export interface AdminMediaUIHandle {
-  openMediaLibrary: () => Promise<void>
+  openMediaLibrary: (opts?: { preselectPaths?: string[] }) => Promise<void>
   closeInspector: () => void
   refreshIfOpen: () => Promise<void>
 }
@@ -126,6 +127,7 @@ export interface AdminMediaUIHandle {
 export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHandle {
   // Media Library Modal DOM
   const mediaModalEl = qs<HTMLElement>('modal-media-library')
+  const mediaPanelEl = qs<HTMLElement>('media-library-panel')
   const mediaCloseBtn = qs<HTMLButtonElement>('btn-media-close')
   const mediaUploadBtn = qs<HTMLButtonElement>('btn-media-upload')
   const mediaUploadInput = qs<HTMLInputElement>('input-media-upload')
@@ -226,24 +228,21 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
           ? 'bg-emerald-500/15 c-emerald-700 dark:c-emerald-400'
           : 'bg-secondary/10 c-secondary/75'
       const badgeLabel = item.pending ? '待提交' : used ? '已用' : '未用'
-      const cardRing = isSelected
-        ? 'border-primary/70 ring-2 ring-highlight'
-        : 'border-secondary/15 hover:border-primary/35'
+      const cardClass = isSelected ? 'media-card is-selected' : 'media-card'
 
-      return `<div data-media-card="${escapeHtml(item.repoPath)}" class="group relative flex flex-col overflow-hidden uno-round-border bg-background transition-all cursor-pointer ${cardRing}">
-        <div class="relative aspect-16/10 w-full overflow-hidden bg-secondary/5">
+      return `<div data-media-card="${escapeHtml(item.repoPath)}" class="${cardClass}">
+        <div class="media-card-thumb">
           <img
             data-media-repo="${escapeHtml(item.repoPath)}"
             src="${escapeHtml(item.previewUrl)}"
             alt="${escapeHtml(item.filename)}"
             loading="lazy"
-            class="h-full w-full object-cover"
           />
-          <span class="absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-medium ${isSelected ? 'bg-primary c-background' : 'bg-black/55 text-white'}">
+          <span class="media-card-badge">
             ${isSelected ? `#${selIdx + 1}` : '选择'}
           </span>
           ${!used
-            ? `<button type="button" data-delete-media="${escapeHtml(item.repoPath)}" class="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white op-0 transition-opacity group-hover:op-100 hover:bg-red-600" title="${item.pending ? '撤销暂存的待提交图片' : '永久删除未引用的图片文件'}">${item.pending ? '撤销' : '删除'}</button>`
+            ? `<button type="button" data-delete-media="${escapeHtml(item.repoPath)}" class="media-card-delete" title="${item.pending ? '撤销暂存的待提交图片' : '永久删除未引用的图片文件'}">${item.pending ? '撤销' : '删除'}</button>`
             : ''}
         </div>
         <div class="flex items-center justify-between gap-2 px-2.5 py-1.5">
@@ -282,11 +281,36 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
     )
   }
 
-  async function loadAndShowMediaLibrary(): Promise<void> {
+  function setMediaFilter(nextFilter: 'all' | 'used' | 'unused'): void {
+    mediaFilter = nextFilter
+    for (const b of mediaFilterBtns) {
+      const active = (b.dataset.mediaFilter || 'all') === nextFilter
+      b.classList.toggle('bg-highlight', active)
+      b.classList.toggle('c-primary', active)
+      b.classList.toggle('font-medium', active)
+    }
+  }
+
+  async function loadAndShowMediaLibrary(opts?: { preselectPaths?: string[] }): Promise<void> {
     const adapter = options.getAdapter()
     if (!adapter) {
       return
     }
+    if (opts?.preselectPaths && opts.preselectPaths.length > 0) {
+      if (mediaFilter !== 'all') {
+        setMediaFilter('all')
+      }
+      if (mediaSearch) {
+        mediaSearch = ''
+        mediaSearchInput.value = ''
+      }
+      for (const p of opts.preselectPaths) {
+        if (!selectedPaths.includes(p)) {
+          selectedPaths.push(p)
+        }
+      }
+    }
+
     mediaModalEl.classList.remove('hidden')
     mediaModalEl.classList.add('flex')
     mediaGridEl.innerHTML = '<div class="col-span-full py-10 text-center text-xs c-secondary/70">正在加载素材库...</div>'
@@ -310,7 +334,11 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
 
   function insertSelectedSingle(tier: ImageTier): void {
     const activePath = options.getActivePath()
-    if (!activePath || selectedPaths.length !== 1) {
+    if (!activePath) {
+      options.showToast('请先在左侧打开或新建一篇文章再插入图片', 'info')
+      return
+    }
+    if (selectedPaths.length !== 1) {
       return
     }
     const repoPath = selectedPaths[0]
@@ -332,7 +360,11 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
 
   function insertSelectedGroup(mode: 'grid-auto' | 'grid-2' | 'grid-3' | 'stage'): void {
     const activePath = options.getActivePath()
-    if (!activePath || selectedPaths.length < 2) {
+    if (!activePath) {
+      options.showToast('请先在左侧打开或新建一篇文章再插入图片', 'info')
+      return
+    }
+    if (selectedPaths.length < 2) {
       return
     }
     const title = mediaGroupTitleInput.value.trim()
@@ -448,13 +480,8 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
 
   for (const btn of mediaFilterBtns) {
     btn.addEventListener('click', () => {
-      mediaFilter = (btn.dataset.mediaFilter as 'all' | 'used' | 'unused') || 'all'
-      for (const b of mediaFilterBtns) {
-        const active = b === btn
-        b.classList.toggle('bg-highlight', active)
-        b.classList.toggle('c-primary', active)
-        b.classList.toggle('font-medium', active)
-      }
+      const next = (btn.dataset.mediaFilter as 'all' | 'used' | 'unused') || 'all'
+      setMediaFilter(next)
       renderMediaGrid()
     })
   }
@@ -468,7 +495,10 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
       if (!repoPath) {
         return
       }
-      const ok = await options.askConfirm('删除图片资源', `确定永久删除「${repoPath}」吗？若文章仍在引用该图片将导致裂图。`, '确认删除')
+      const targetItem = mediaItems.find(m => m.repoPath === repoPath)
+      const ok = targetItem?.pending
+        ? await options.askConfirm('撤销待提交图片', `确定从暂存队列移除「${targetItem.filename}」吗？尚未提交到 GitHub。`, '确认撤销')
+        : await options.askConfirm('删除图片资源', `确定永久删除「${repoPath}」吗？若文章仍在引用该图片将导致裂图。`, '确认删除')
       if (!ok) {
         return
       }
@@ -481,7 +511,8 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
         selectedPaths = selectedPaths.filter(p => p !== repoPath)
         mediaItems = mediaItems.filter(m => m.repoPath !== repoPath)
         renderMediaGrid()
-        options.showToast('图片文件已删除', 'success')
+        options.onMediaChanged?.()
+        options.showToast(targetItem?.pending ? '已撤销该暂存图片' : '图片文件已删除', 'success')
       }
       catch (err) {
         options.showToast(err instanceof Error ? err.message : '删除图片失败', 'error')
@@ -523,14 +554,48 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
     })
   }
 
+  async function handleLibraryUploadFiles(files: FileList | File[]): Promise<void> {
+    const uploadedPaths = await options.onUploadToLibrary(files)
+    if (uploadedPaths.length > 0) {
+      options.onMediaChanged?.()
+      if (!mediaModalEl.classList.contains('hidden')) {
+        await loadAndShowMediaLibrary({ preselectPaths: uploadedPaths })
+      }
+    }
+  }
+
   mediaUploadBtn.addEventListener('click', () => mediaUploadInput.click())
   mediaUploadInput.addEventListener('change', async () => {
     if (mediaUploadInput.files && mediaUploadInput.files.length > 0) {
-      await options.onUploadFiles(mediaUploadInput.files)
+      await handleLibraryUploadFiles(mediaUploadInput.files)
       mediaUploadInput.value = ''
-      if (!mediaModalEl.classList.contains('hidden')) {
-        await loadAndShowMediaLibrary()
-      }
+    }
+  })
+
+  mediaPanelEl.addEventListener('dragover', (ev) => {
+    if (ev.dataTransfer?.types.includes('Files')) {
+      ev.preventDefault()
+      mediaPanelEl.classList.add('ring-2', 'ring-primary/50')
+    }
+  })
+
+  mediaPanelEl.addEventListener('dragleave', (ev) => {
+    if (ev.relatedTarget instanceof Node && mediaPanelEl.contains(ev.relatedTarget)) {
+      return
+    }
+    mediaPanelEl.classList.remove('ring-2', 'ring-primary/50')
+  })
+
+  mediaPanelEl.addEventListener('drop', (ev) => {
+    mediaPanelEl.classList.remove('ring-2', 'ring-primary/50')
+    const files = ev.dataTransfer?.files
+    if (!files || files.length === 0) {
+      return
+    }
+    const hasImg = Array.from(files).some(f => f.type.startsWith('image/') || /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(f.name))
+    if (hasImg) {
+      ev.preventDefault()
+      void handleLibraryUploadFiles(files)
     }
   })
 

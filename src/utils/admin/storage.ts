@@ -407,6 +407,7 @@ export class GitHubStorageAdapter implements StorageAdapter {
   private fileContentCache = new Map<string, { content: string, sha: string }>()
   private mediaUrlCache = new Map<string, string>()
   private pendingUploads = new Map<string, PendingGitHubUpload>()
+  private uploadSeq = 0
 
   constructor(config: GitHubConfig) {
     this.config = {
@@ -776,7 +777,8 @@ export class GitHubStorageAdapter implements StorageAdapter {
       .replace(/^-+|-+$/g, '')
       .slice(0, 48) || 'img'
 
-    const uniqueName = `${stem}-${Date.now().toString(36)}${ext}`
+    this.uploadSeq += 1
+    const uniqueName = `${stem}-${Date.now().toString(36)}${this.uploadSeq.toString(36)}${ext}`
     const repoPath = `src/content/posts/_images/${uniqueName}`
     const base64Data = await fileToBase64(optimized)
     const previewUrl = URL.createObjectURL(optimized)

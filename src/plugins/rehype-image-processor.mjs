@@ -20,7 +20,14 @@ function parseImageMeta(imgNode) {
     delete imgNode.properties.title
   }
 
-  imgNode.properties['data-caption'] = skipCaption ? '' : cleanCaption
+  if (skipCaption) {
+    delete imgNode.properties['data-caption']
+    imgNode.properties['data-caption-hidden'] = 'true'
+  }
+  else {
+    imgNode.properties['data-caption'] = cleanCaption
+    delete imgNode.properties['data-caption-hidden']
+  }
   return {
     skipCaption,
     cleanCaption,
@@ -273,10 +280,17 @@ export function rehypeImageProcessor() {
       else {
         heroProps.className = ['img-stage-img']
       }
-      heroProps['data-stage-hero'] = ''
+      heroProps['data-stage-hero'] = 'true'
       heroProps['data-gallery-group'] = groupId
       heroProps['data-gallery-index'] = '0'
-      heroProps['data-caption'] = firstMeta.skipCaption ? '' : firstMeta.cleanCaption
+      if (firstMeta.skipCaption) {
+        delete heroProps['data-caption']
+        heroProps['data-caption-hidden'] = 'true'
+      }
+      else {
+        heroProps['data-caption'] = firstMeta.cleanCaption
+        delete heroProps['data-caption-hidden']
+      }
 
       const heroImg = {
         ...firstImg,

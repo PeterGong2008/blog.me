@@ -889,6 +889,44 @@ export function initAdminApp(): void {
     schedulePreviewRender()
   }
 
+  async function uploadFilesToLibrary(files: FileList | File[]): Promise<string[]> {
+    if (!state.adapter) {
+      return []
+    }
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/') || /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(f.name))
+    if (imageFiles.length === 0) {
+      return []
+    }
+
+    const postPathHint = state.activePath || 'src/content/posts/placeholder.md'
+    const uploadedPaths: string[] = []
+    let hasPendingUpload = false
+    for (const file of imageFiles) {
+      try {
+        showToast(`正在处理并上传图片 ${file.name || 'image'}...`, 'info')
+        const res = await state.adapter.uploadImage(file, postPathHint)
+        if (res.pending) {
+          hasPendingUpload = true
+        }
+        uploadedPaths.push(res.repoPath)
+      }
+      catch (err) {
+        showToast(err instanceof Error ? err.message : '图片上传失败', 'error')
+      }
+    }
+
+    updateModeUI()
+    if (uploadedPaths.length > 0) {
+      showToast(
+        hasPendingUpload
+          ? `已压缩暂存 ${uploadedPaths.length} 张图片到素材库，可按需选择插入（提交发布时一次上传）`
+          : `已上传 ${uploadedPaths.length} 张图片到素材库，可按需选择插入正文`,
+        'success',
+      )
+    }
+    return uploadedPaths
+  }
+
   async function handleImageFiles(files: FileList | File[]): Promise<void> {
     if (!state.adapter || !state.activePath) {
       return
@@ -974,7 +1012,8 @@ export function initAdminApp(): void {
     insertAtCursor: (text) => {
       insertTextAtCursor(text, '', '')
     },
-    onUploadFiles: files => handleImageFiles(files),
+    onUploadToLibrary: files => uploadFilesToLibrary(files),
+    onMediaChanged: () => updateModeUI(),
     askConfirm,
     showToast,
     bodyTextarea,
@@ -1295,10 +1334,13 @@ export function initAdminApp(): void {
   mediaLibraryBtn.addEventListener('click', () => void mediaUI?.openMediaLibrary())
   insertGridBtn.addEventListener('click', () => wrapOrInsertImageContainer('grid'))
   insertGalleryBtn.addEventListener('click', () => wrapOrInsertImageContainer('gallery'))
-  uploadImgInput.addEventListener('change', () => {
+  uploadImgInput.addEventListener('change', async () => {
     if (uploadImgInput.files && uploadImgInput.files.length > 0) {
-      void handleImageFiles(uploadImgInput.files)
+      const uploadedPaths = await uploadFilesToLibrary(uploadImgInput.files)
       uploadImgInput.value = ''
+      if (uploadedPaths.length > 0) {
+        await mediaUI?.openMediaLibrary({ preselectPaths: uploadedPaths })
+      }
     }
   })
 
@@ -1355,7 +1397,7 @@ export function initAdminApp(): void {
   })
 
   window.addEventListener('beforeunload', (ev) => {
-    if (state.dirty) {
+    if (state.dirty || (state.adapter?.getPendingUploadCount?.() ?? 0) > 0) {
       ev.preventDefault()
     }
   })
@@ -1683,7 +1725,7 @@ export function initAdminApp(): void {
       { type: 'item', label: '插入代码块', shortcut: '```', onClick: () => insertTextAtCursor('```ts\n', '\n```', 'console.log("hello")') },
       { type: 'item', label: '插入数学公式', shortcut: '$$', onClick: () => insertTextAtCursor('$$\n', '\n$$', 'E = mc^2') },
       { type: 'divider' },
-      { type: 'item', label: '上传并插入图片', onClick: () => uploadImgInput.click() },
+      { type: 'item', label: '上传图片到素材库', onClick: () => uploadImgInput.click() },
       { type: 'item', label: '打开图片素材库', onClick: () => mediaUI?.openMediaLibrary() },
       { type: 'item', label: '插入宽幅大图', onClick: () => insertTextAtCursor('![图注](./_images/example.jpg "wide")\n', '', '') },
       { type: 'item', label: '插入竖图伴读', onClick: () => insertTextAtCursor('![要点说明 | 正文描述](./_images/example.jpg "compact")\n', '', '') },

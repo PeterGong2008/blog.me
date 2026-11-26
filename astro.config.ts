@@ -98,7 +98,7 @@ export default defineConfig({
       {
         name: 'prefix-font-urls-with-base',
         transform(code, id) {
-          if (!id.split('?')[0].endsWith('src/styles/font.css')) {
+          if (!id.split('?')[0].replace(/\\/g, '/').endsWith('src/styles/font.css')) {
             return null
           }
 
