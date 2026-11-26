@@ -1,0 +1,595 @@
+---
+import katexCSS from 'katex/dist/katex.min.css?url'
+import { base, themeConfig } from '@/config'
+import '@/styles/extension.css'
+import '@/styles/font.css'
+import '@/styles/global.css'
+import '@/styles/markdown.css'
+
+const { mode: defaultMode } = themeConfig.color
+---
+
+<!doctype html>
+<html lang="zh-CN" class="font-sans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="icon" type="image/svg+xml" href={`${base}/icons/favicon.svg`} />
+    <title>写作台 | “绪”</title>
+    <link rel="stylesheet" href={katexCSS} />
+    <script
+      is:inline
+      define:vars={{
+        defaultMode,
+      }}
+    >
+    (function () {
+      const stored = localStorage.getItem('theme')
+      const isDark = stored ? stored === 'dark' : defaultMode === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : defaultMode === 'dark'
+      document.documentElement.classList.toggle('dark', isDark)
+      document.documentElement.style.colorScheme = isDark ? 'dark' : 'light'
+    })()
+    </script>
+  </head>
+  <body class="h-screen w-screen flex flex-col overflow-hidden bg-background c-secondary">
+    <!-- Top Header Bar -->
+    <header class="h-13 flex shrink-0 items-center justify-between gap-3 border-b border-secondary/12 px-4">
+      <div class="min-w-0 flex items-center gap-3">
+        <button
+          id="btn-toggle-sidebar"
+          type="button"
+          class="uno-round-border border-secondary/15 px-2 py-1 text-xs c-secondary transition-colors hover:border-primary/30 hover:c-primary"
+          title="展开/收起文章列表"
+        >
+          目录栏
+        </button>
+        <a
+          href={`${base}/`}
+          class="text-lg c-primary font-bold tracking-wide font-title cjk:font-title-cjk"
+          title="返回博客首页"
+        >
+          “绪”
+        </a>
+        <span class="text-xs c-secondary/50">/</span>
+        <span class="text-xs c-secondary/80 font-medium">写作台</span>
+        <span id="active-file-path" class="hidden max-w-80 truncate text-xs c-secondary/60 md:inline">未选择文章</span>
+        <span id="dirty-badge" class="hidden rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] c-amber-700 dark:c-amber-400">未保存</span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button
+          id="btn-mode-badge"
+          type="button"
+          class="flex items-center gap-1.5 uno-round-border border-secondary/15 px-2.5 py-1 text-xs c-secondary transition-colors hover:border-primary/30 hover:c-primary"
+          title="配置 GitHub 连接或切换模式"
+        >
+          <span id="mode-dot" class="h-2 w-2 rounded-full bg-emerald-500"></span>
+          <span id="mode-label">检测中...</span>
+        </button>
+
+        <div class="hidden items-center uno-round-border border-secondary/15 p-0.5 sm:flex">
+          <button type="button" data-view-mode="edit" class="rounded px-2 py-0.5 text-xs transition-colors">编辑</button>
+          <button type="button" data-view-mode="split" class="rounded bg-highlight px-2 py-0.5 text-xs c-primary font-medium transition-colors">分屏</button>
+          <button type="button" data-view-mode="preview" class="rounded px-2 py-0.5 text-xs transition-colors">预览</button>
+        </div>
+
+        <button
+          id="btn-theme-toggle"
+          type="button"
+          class="uno-round-border border-secondary/15 px-2.5 py-1 text-xs c-secondary transition-colors hover:border-primary/30 hover:c-primary"
+          title="切换明暗主题"
+        >
+          明暗
+        </button>
+
+        <button
+          id="btn-save"
+          type="button"
+          class="rounded bg-primary px-3 py-1 text-xs c-background font-medium transition-opacity hover:op-90"
+          title="保存 (Ctrl+S)"
+        >
+          保存
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Split Layout -->
+    <div class="min-h-0 flex flex-1">
+      <!-- Left Sidebar -->
+      <aside
+        id="admin-sidebar"
+        class="w-72 flex shrink-0 flex-col border-r border-secondary/12 bg-background"
+      >
+        <div class="flex flex-col gap-2.5 border-b border-secondary/10 p-3">
+          <button
+            id="btn-new-post"
+            type="button"
+            class="w-full uno-round-border border-secondary/20 bg-secondary/4 py-1.5 text-xs c-primary font-medium transition-colors hover:border-primary/40 hover:bg-highlight/50"
+          >
+            + 新建文章
+          </button>
+
+          <input
+            id="search-input"
+            type="search"
+            placeholder="搜索标题、标签或路径..."
+            class="w-full uno-round-border border-secondary/15 bg-transparent px-2.5 py-1.5 text-xs c-primary outline-none focus:border-primary/40"
+          />
+
+          <div class="flex flex-wrap gap-1">
+            <button type="button" data-filter="all" class="rounded bg-highlight px-2 py-0.5 text-[11px] c-primary font-medium">全部</button>
+            <button type="button" data-filter="zh" class="rounded px-2 py-0.5 text-[11px] c-secondary hover:bg-secondary/5">中文</button>
+            <button type="button" data-filter="en" class="rounded px-2 py-0.5 text-[11px] c-secondary hover:bg-secondary/5">En</button>
+            <button type="button" data-filter="universal" class="rounded px-2 py-0.5 text-[11px] c-secondary hover:bg-secondary/5">通用</button>
+            <button type="button" data-filter="draft" class="rounded px-2 py-0.5 text-[11px] c-secondary hover:bg-secondary/5">草稿</button>
+          </div>
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto p-2">
+          <div class="px-2 pb-1 text-[11px] c-secondary/60 font-medium">文章列表</div>
+          <div id="post-list" class="flex flex-col gap-0.5"></div>
+
+          <div class="mt-4 px-2 pb-1 text-[11px] c-secondary/60 font-medium">关于页面</div>
+          <div id="about-list" class="flex flex-col gap-0.5"></div>
+        </div>
+      </aside>
+
+      <!-- Main Workspace -->
+      <main class="min-w-0 flex flex-1 flex-col bg-background">
+        <div id="workspace-empty" class="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+          <div class="text-lg c-primary font-title cjk:font-title-cjk">“绪” · 写作台</div>
+          <p class="max-w-md text-xs c-secondary/80 leading-relaxed">
+            选择左侧任意文章开始编辑，或点击「+ 新建文章」开始创作。本地运行时直接读写磁盘文件，线上可通过右上角配置 GitHub Token 提交发布。
+          </p>
+        </div>
+
+        <div id="workspace-editor" class="hidden min-h-0 flex-1 flex-col">
+          <!-- Frontmatter Metadata Bar -->
+          <section class="border-b border-secondary/10 px-4 py-2.5">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <button
+                id="btn-toggle-meta"
+                type="button"
+                class="text-xs c-secondary/80 transition-colors hover:c-primary"
+              >
+                收起文章信息
+              </button>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <button
+                  id="btn-pair-lang"
+                  type="button"
+                  class="hidden uno-round-border border-secondary/15 px-2 py-0.5 text-xs c-secondary transition-colors hover:border-primary/30 hover:c-primary"
+                >
+                  创建英文版
+                </button>
+                <a
+                  id="link-view-page"
+                  href={`${base}/`}
+                  target="_blank"
+                  rel="noopener"
+                  class="uno-round-border border-secondary/15 px-2 py-0.5 text-xs c-secondary transition-colors hover:border-primary/30 hover:c-primary"
+                >
+                  查看页面 ↗
+                </a>
+                <button
+                  id="btn-delete-post"
+                  type="button"
+                  class="uno-round-border border-red-500/25 px-2 py-0.5 text-xs c-red-600 transition-colors hover:bg-red-500/10 dark:c-red-400"
+                >
+                  删除文章
+                </button>
+              </div>
+            </div>
+
+            <div id="meta-fields" class="grid grid-cols-1 mt-2.5 gap-2.5 md:grid-cols-12">
+              <label data-post-only class="flex flex-col gap-1 md:col-span-5">
+                <span class="text-[11px] c-secondary/70">文章标题</span>
+                <input id="meta-title" type="text" class="uno-round-border border-secondary/15 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+
+              <label data-post-only class="flex flex-col gap-1 md:col-span-2">
+                <span class="text-[11px] c-secondary/70">发布日期</span>
+                <input id="meta-published" type="date" class="uno-round-border border-secondary/15 bg-transparent px-2 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+
+              <label data-post-only class="flex flex-col gap-1 md:col-span-2">
+                <span class="text-[11px] c-secondary/70">更新日期</span>
+                <input id="meta-updated" type="date" class="uno-round-border border-secondary/15 bg-transparent px-2 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+
+              <label class="flex flex-col gap-1 md:col-span-3">
+                <span class="text-[11px] c-secondary/70">语言 (lang)</span>
+                <select id="meta-lang" class="uno-round-border border-secondary/15 bg-background px-2 py-1 text-xs c-primary outline-none focus:border-primary/40">
+                  <option value="zh">zh（中文）</option>
+                  <option value="en">en（English）</option>
+                  <option value="">通用（中英文共用）</option>
+                </select>
+              </label>
+
+              <div data-post-only class="flex flex-col gap-1 md:col-span-4">
+                <span class="text-[11px] c-secondary/70">自定义链接 (abbrlink)</span>
+                <div class="flex gap-1">
+                  <input id="meta-abbrlink" type="text" placeholder="如 my-first-post" class="min-w-0 flex-1 uno-round-border border-secondary/15 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+                  <button id="btn-gen-slug" type="button" class="shrink-0 uno-round-border border-secondary/15 px-2 py-1 text-[11px] c-secondary hover:c-primary">生成</button>
+                </div>
+              </div>
+
+              <label data-post-only class="flex flex-col gap-1 md:col-span-4">
+                <span class="text-[11px] c-secondary/70">标签 (tags，逗号分隔)</span>
+                <input id="meta-tags" type="text" placeholder="随笔, 技术" class="uno-round-border border-secondary/15 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+
+              <label data-post-only class="flex flex-col gap-1 md:col-span-1">
+                <span class="text-[11px] c-secondary/70">置顶 (0-99)</span>
+                <input id="meta-pin" type="number" min="0" max="99" value="0" class="uno-round-border border-secondary/15 bg-transparent px-2 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+
+              <div data-post-only class="flex items-end gap-3 pb-1 md:col-span-3">
+                <label class="flex cursor-pointer items-center gap-1.5 text-xs c-secondary">
+                  <input id="meta-draft" type="checkbox" class="accent-current" />
+                  <span>草稿</span>
+                </label>
+                <label class="flex cursor-pointer items-center gap-1.5 text-xs c-secondary">
+                  <input id="meta-toc" type="checkbox" checked class="accent-current" />
+                  <span>显示目录</span>
+                </label>
+              </div>
+
+              <label data-post-only class="flex flex-col gap-1 md:col-span-12">
+                <span class="text-[11px] c-secondary/70">摘要描述 (description，可选)</span>
+                <input id="meta-description" type="text" placeholder="留空则自动截取正文开头..." class="uno-round-border border-secondary/15 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40" />
+              </label>
+            </div>
+          </section>
+
+          <!-- Markdown Formatting Toolbar -->
+          <section class="flex flex-wrap items-center justify-between gap-2 border-b border-secondary/10 px-4 py-1.5">
+            <div class="flex flex-wrap items-center gap-1">
+              <button type="button" data-md-action="bold" class="rounded px-2 py-0.5 text-xs font-bold hover:bg-secondary/8" title="加粗">B</button>
+              <button type="button" data-md-action="italic" class="rounded px-2 py-0.5 text-xs italic hover:bg-secondary/8" title="斜体">I</button>
+              <button type="button" data-md-action="h2" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="二级标题">H2</button>
+              <button type="button" data-md-action="h3" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="三级标题">H3</button>
+              <button type="button" data-md-action="quote" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="引用">引用</button>
+              <button type="button" data-md-action="code" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="代码块">代码</button>
+              <button type="button" data-md-action="math" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="数学公式">公式</button>
+              <button type="button" data-md-action="link" class="rounded px-2 py-0.5 text-xs hover:bg-secondary/8" title="链接">链接</button>
+              <span class="mx-1 h-3.5 w-px bg-secondary/15"></span>
+              <button id="btn-upload-image" type="button" class="rounded px-2 py-0.5 text-xs c-primary hover:bg-secondary/8" title="上传图片（支持一次多选自动排成多宫格，也支持直接粘贴或拖拽图片）">
+                上传图片
+              </button>
+              <button id="btn-media-library" type="button" class="rounded px-2 py-0.5 text-xs c-secondary hover:bg-secondary/8 hover:c-primary" title="浏览文章配图素材库，多选一键插入多宫格或画廊">
+                素材库
+              </button>
+              <button id="btn-insert-grid" type="button" class="rounded px-2 py-0.5 text-xs c-secondary hover:bg-secondary/8 hover:c-primary" title="将选中图片包装或插入多宫格 (:::grid)">
+                多宫格
+              </button>
+              <button id="btn-insert-gallery" type="button" class="rounded px-2 py-0.5 text-xs c-secondary hover:bg-secondary/8 hover:c-primary" title="将选中图片包装或插入舞台画廊 (:::gallery)">
+                画廊
+              </button>
+              <input id="input-upload-image" type="file" accept="image/*" multiple class="hidden" />
+              <button id="btn-format-body" type="button" class="rounded px-2 py-0.5 text-xs c-secondary hover:bg-secondary/8" title="自动优化中英文混排空格与标点">
+                排版空格
+              </button>
+            </div>
+            <span id="word-count" class="text-[11px] c-secondary/65">0 字</span>
+          </section>
+
+          <!-- Editor + Live Preview Panes -->
+          <div id="editor-panes" class="grid grid-cols-1 min-h-0 flex-1 lg:grid-cols-2">
+            <div id="pane-editor" class="min-h-0 flex flex-col border-secondary/10 lg:border-r">
+              <textarea
+                id="body-editor"
+                spellcheck="false"
+                placeholder="在此使用 Markdown 写作（支持拖放或直接 Ctrl+V 粘贴图片、KaTeX 公式 $...$ / $$...$$）..."
+                class="min-h-0 w-full flex-1 resize-none bg-transparent p-5 text-sm c-primary leading-relaxed font-mono outline-none"
+              ></textarea>
+            </div>
+
+            <div id="pane-preview" class="min-h-0 overflow-y-auto px-6 py-5">
+              <article class="heti admin-preview mx-auto max-w-2xl">
+                <h1 id="preview-title" class="post-title c-primary"></h1>
+                <div id="preview-meta" class="mb-6 text-xs c-secondary/70 font-navbar"></div>
+                <div id="preview-body"></div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Modal: New Post -->
+    <div id="modal-new-post" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+      <div class="max-w-md w-full uno-round-border border-secondary/20 bg-background p-5 shadow-lg">
+        <h2 class="text-base c-primary font-semibold">新建文章</h2>
+        <div class="mt-4 flex flex-col gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">文章标题</span>
+            <input id="new-post-title" type="text" placeholder="例如：冬日随想" class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-sm c-primary outline-none focus:border-primary/50" />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">语言</span>
+            <select id="new-post-lang" class="uno-round-border border-secondary/20 bg-background px-3 py-1.5 text-sm c-primary outline-none focus:border-primary/50">
+              <option value="zh">zh（中文）</option>
+              <option value="en">en（English）</option>
+              <option value="">通用（中英文共用）</option>
+            </select>
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">文件路径（位于 src/content/posts/ 下）</span>
+            <input id="new-post-path" type="text" class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-xs c-primary font-mono outline-none focus:border-primary/50" />
+          </label>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button id="btn-new-cancel" type="button" class="uno-round-border border-secondary/20 px-3 py-1.5 text-xs c-secondary hover:c-primary">取消</button>
+          <button id="btn-new-confirm" type="button" class="rounded bg-primary px-3.5 py-1.5 text-xs c-background font-medium">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: GitHub Connection Settings -->
+    <div id="modal-github" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+      <div class="max-w-lg w-full uno-round-border border-secondary/20 bg-background p-5 shadow-lg">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base c-primary font-semibold">GitHub 线上写作连接设置</h2>
+          <button id="btn-gh-close" type="button" class="text-xs c-secondary hover:c-primary">关闭</button>
+        </div>
+        <p class="mt-2 text-xs c-secondary/80 leading-relaxed">
+          部署到 GitHub Pages 后，只需填写一次你的仓库信息和细粒度令牌（Fine-Grained PAT），即可直接在浏览器写文章并提交到仓库（Token 仅保存在你当前浏览器的 <code class="px-1">localStorage</code> 中）。
+        </p>
+
+        <div class="mt-3 rounded bg-secondary/5 p-3 text-[11px] c-secondary/85 leading-relaxed">
+          <strong>如何生成 Token：</strong> 打开 GitHub → Settings → Developer settings → Personal access tokens →
+          <strong>Fine-grained tokens</strong> → Only select repositories（仅选你的博客仓库）→ Repository permissions 设置
+          <strong>Contents: Read and write</strong>。
+        </div>
+
+        <div class="mt-4 flex flex-col gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">GitHub 仓库（用户名/仓库名）</span>
+            <input id="gh-repo" type="text" placeholder="yourname/your-blog-repo" class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-sm c-primary font-mono outline-none focus:border-primary/50" />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">分支</span>
+            <input id="gh-branch" type="text" value="main" class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-sm c-primary font-mono outline-none focus:border-primary/50" />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs c-secondary/80">Fine-Grained Personal Access Token</span>
+            <input id="gh-token" type="password" placeholder="github_pat_..." class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-sm c-primary font-mono outline-none focus:border-primary/50" />
+          </label>
+          <div id="gh-test-status" class="min-h-4 text-xs c-primary/85"></div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex gap-2">
+            <button id="btn-gh-local" type="button" class="hidden uno-round-border border-secondary/20 px-2.5 py-1.5 text-xs c-secondary hover:c-primary">切回本地模式</button>
+            <button id="btn-gh-clear" type="button" class="uno-round-border border-secondary/20 px-2.5 py-1.5 text-xs c-secondary hover:c-primary">清除 Token</button>
+          </div>
+          <div class="flex gap-2">
+            <button id="btn-gh-test" type="button" class="uno-round-border border-secondary/20 px-3 py-1.5 text-xs c-secondary hover:c-primary">测试连接</button>
+            <button id="btn-gh-save" type="button" class="rounded bg-primary px-3.5 py-1.5 text-xs c-background font-medium">保存并进入 GitHub 模式</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirm -->
+    <div id="modal-confirm" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+      <div class="max-w-sm w-full uno-round-border border-secondary/20 bg-background p-5 shadow-lg">
+        <h3 id="confirm-title" class="text-sm c-primary font-semibold"></h3>
+        <p id="confirm-desc" class="mt-2 text-xs c-secondary/85 leading-relaxed"></p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button id="btn-confirm-cancel" type="button" class="uno-round-border border-secondary/20 px-3 py-1 text-xs c-secondary hover:c-primary">取消</button>
+          <button id="btn-confirm-ok" type="button" class="rounded bg-primary px-3 py-1 text-xs c-background font-medium">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Rename / Move Post -->
+    <div id="modal-rename-post" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+      <div class="max-w-md w-full uno-round-border border-secondary/20 bg-background p-5 shadow-lg">
+        <h3 class="text-sm c-primary font-semibold">重命名 / 移动文章路径</h3>
+        <div class="mt-3 flex flex-col gap-1.5">
+          <span class="text-xs c-secondary/80">目标文件路径（位于 src/content/posts/ 下）</span>
+          <input id="rename-post-path" type="text" class="uno-round-border border-secondary/20 bg-transparent px-3 py-1.5 text-xs c-primary font-mono outline-none focus:border-primary/50" />
+        </div>
+        <div class="mt-4 flex justify-end gap-2">
+          <button id="btn-rename-cancel" type="button" class="uno-round-border border-secondary/20 px-3 py-1 text-xs c-secondary hover:c-primary">取消</button>
+          <button id="btn-rename-confirm" type="button" class="rounded bg-primary px-3 py-1 text-xs c-background font-medium">确认重命名</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Media Library -->
+    <div id="modal-media-library" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/45 p-4">
+      <div class="max-h-[85vh] max-w-3xl w-full flex flex-col uno-round-border border-secondary/20 bg-background shadow-xl">
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-secondary/12 px-5 py-3.5">
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm c-primary font-semibold">图片素材库</h3>
+            <span class="text-[11px] c-secondary/65">src/content/posts/_images/</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="btn-media-upload" type="button" class="uno-round-border border-secondary/20 px-2.5 py-1 text-xs c-primary hover:bg-secondary/5">+ 上传图片</button>
+            <input id="input-media-upload" type="file" accept="image/*" multiple class="hidden" />
+            <button id="btn-media-close" type="button" class="px-2 py-1 text-xs c-secondary hover:c-primary">关闭</button>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-secondary/10 px-5 py-2.5">
+          <div class="flex items-center gap-1">
+            <button type="button" data-media-filter="all" class="rounded bg-highlight px-2.5 py-0.5 text-xs c-primary font-medium">全部</button>
+            <button type="button" data-media-filter="used" class="rounded px-2.5 py-0.5 text-xs c-secondary hover:bg-secondary/5">本文已用</button>
+            <button type="button" data-media-filter="unused" class="rounded px-2.5 py-0.5 text-xs c-secondary hover:bg-secondary/5">未引用</button>
+          </div>
+          <input
+            id="media-search-input"
+            type="search"
+            placeholder="搜索图片文件名..."
+            class="w-52 uno-round-border border-secondary/15 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40"
+          />
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto p-5">
+          <div id="media-library-grid" class="grid grid-cols-2 gap-3 sm:grid-cols-3"></div>
+          <div id="media-library-empty" class="hidden py-12 text-center text-xs c-secondary/65">
+            当前筛选条件下没有图片。点击右上角「+ 上传图片」或直接拖放图片到写作区。
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-2 border-t border-secondary/12 px-5 py-3">
+          <div class="min-w-0 flex flex-1 flex-wrap items-center gap-2">
+            <span id="media-selection-hint" class="text-xs c-secondary/75">点选图片插入正文；多选 2 张及以上可一键插入多宫格或舞台画廊</span>
+
+            <div id="media-single-actions" class="hidden flex-wrap items-center gap-1.5">
+              <button type="button" data-media-insert-tier="standard" class="rounded bg-primary px-2.5 py-1 text-xs c-background font-medium">插入标准图</button>
+              <button type="button" data-media-insert-tier="wide" class="uno-round-border border-secondary/25 px-2.5 py-1 text-xs c-primary hover:bg-highlight/50">插入宽幅大图</button>
+              <button type="button" data-media-insert-tier="compact" class="uno-round-border border-secondary/25 px-2.5 py-1 text-xs c-primary hover:bg-highlight/50">插入竖图伴读</button>
+            </div>
+
+            <div id="media-multi-actions" class="hidden flex-wrap items-center gap-1.5">
+              <input
+                id="media-group-title"
+                type="text"
+                placeholder="图集标题（可选）"
+                class="w-36 uno-round-border border-secondary/20 bg-transparent px-2 py-1 text-xs c-primary outline-none focus:border-primary/40"
+              />
+              <button type="button" data-media-insert-group="grid-auto" class="rounded bg-primary px-2.5 py-1 text-xs c-background font-medium">插入多宫格 (自动)</button>
+              <button type="button" data-media-insert-group="grid-2" class="uno-round-border border-secondary/25 px-2 py-1 text-xs c-primary hover:bg-highlight/50">2列四宫格</button>
+              <button type="button" data-media-insert-group="grid-3" class="uno-round-border border-secondary/25 px-2 py-1 text-xs c-primary hover:bg-highlight/50">3列九宫格</button>
+              <button type="button" data-media-insert-group="stage" class="uno-round-border border-secondary/25 px-2 py-1 text-xs c-primary hover:bg-highlight/50">舞台画廊</button>
+            </div>
+          </div>
+
+          <button id="btn-media-clear" type="button" class="hidden text-xs c-secondary hover:c-primary">取消选择</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Popover: Preview Image Inspector -->
+    <div
+      id="image-inspector"
+      role="dialog"
+      aria-label="图片属性编辑"
+      class="fixed z-55 hidden w-76 uno-round-border border-secondary/20 bg-background p-3.5 shadow-xl"
+    >
+      <div class="flex items-center justify-between gap-2 pb-2">
+        <span class="text-xs c-primary font-semibold">图片排版与图注</span>
+        <button id="btn-inspector-close" type="button" class="text-[11px] c-secondary hover:c-primary">关闭</button>
+      </div>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-[11px] c-secondary/75">图注说明（伴读可用「小标题 | 正文」）</span>
+        <input
+          id="inspector-alt"
+          type="text"
+          placeholder="输入图片说明文字..."
+          class="uno-round-border border-secondary/20 bg-transparent px-2.5 py-1 text-xs c-primary outline-none focus:border-primary/40"
+        />
+      </label>
+
+      <label class="mt-2.5 flex cursor-pointer items-center gap-1.5 text-xs c-secondary">
+        <input id="inspector-hide-caption" type="checkbox" class="accent-current" />
+        <span>隐藏图注（自动维护 _ 前缀）</span>
+      </label>
+
+      <div class="mt-3">
+        <span class="mb-1 block text-[11px] c-secondary/75">画幅档位</span>
+        <div class="grid grid-cols-3 gap-1 uno-round-border border-secondary/15 p-0.5">
+          <button type="button" data-inspector-tier="standard" class="rounded py-1 text-xs transition-colors">标准</button>
+          <button type="button" data-inspector-tier="wide" class="rounded py-1 text-xs transition-colors">宽幅</button>
+          <button type="button" data-inspector-tier="compact" class="rounded py-1 text-xs transition-colors">伴读</button>
+        </div>
+      </div>
+
+      <div class="mt-3 flex items-center justify-between gap-2 border-t border-secondary/10 pt-2.5">
+        <button id="btn-inspector-locate" type="button" class="uno-round-border border-secondary/20 px-2.5 py-1 text-[11px] c-secondary hover:c-primary">定位源码</button>
+        <button id="btn-inspector-remove" type="button" class="uno-round-border border-red-500/25 px-2.5 py-1 text-[11px] c-red-600 hover:bg-red-500/10 dark:c-red-400">移除图片</button>
+      </div>
+    </div>
+
+    <!-- Custom Context Menu -->
+    <div
+      id="admin-context-menu"
+      role="menu"
+      class="fixed hidden min-w-44 uno-round-border border-secondary/20 bg-background py-1 shadow-lg"
+    ></div>
+
+    <!-- Toast Notification -->
+    <div
+      id="admin-toast"
+      class="fixed bottom-5 right-5 z-50 hidden uno-round-border border-secondary/20 bg-background px-3.5 py-2 text-xs c-primary shadow-md"
+    ></div>
+
+    <script>
+      import { initAdminApp } from '@/utils/admin/app'
+
+      initAdminApp()
+    </script>
+    <style is:global>
+      #post-list button,
+      #about-list button {
+        text-align: left;
+      }
+
+      #admin-context-menu {
+        z-index: 60;
+      }
+
+      #admin-context-menu .ctx-item {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.375rem 0.75rem;
+        font-size: 0.75rem;
+        line-height: 1.25;
+        text-align: left;
+        background: transparent;
+        cursor: pointer;
+        --at-apply: 'c-secondary transition-colors';
+      }
+
+      #admin-context-menu .ctx-item:hover {
+        --at-apply: 'bg-highlight c-primary';
+      }
+
+      #admin-context-menu .ctx-item.ctx-danger {
+        color: #dc2626;
+      }
+
+      html.dark #admin-context-menu .ctx-item.ctx-danger {
+        color: #f87171;
+      }
+
+      #admin-context-menu .ctx-item.ctx-danger:hover {
+        background-color: rgb(239 68 68 / 0.12);
+        color: #b91c1c;
+      }
+
+      html.dark #admin-context-menu .ctx-item.ctx-danger:hover {
+        color: #fca5a5;
+      }
+
+      #admin-context-menu .ctx-divider {
+        margin: 0.25rem 0;
+        height: 1px;
+        --at-apply: 'bg-secondary/12';
+      }
+
+      .admin-preview [data-admin-img-idx] {
+        cursor: pointer;
+        transition: box-shadow 150ms ease-out, filter 200ms ease-out;
+      }
+
+      .admin-preview [data-admin-img-idx]:hover {
+        box-shadow: 0 0 0 2px oklch(0.52 0.16 268 / 0.55);
+      }
+
+      #image-inspector {
+        z-index: 55;
+      }
+    </style>
+  </body>
+</html>

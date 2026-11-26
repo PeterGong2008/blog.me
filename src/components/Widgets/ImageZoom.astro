@@ -1,0 +1,436 @@
+<script>
+interface ZoomState {
+  overlay: HTMLDivElement | null
+  bar: HTMLDivElement | null
+  captionEl: HTMLParagraphElement | null
+  countEl: HTMLSpanElement | null
+  prevBtn: HTMLButtonElement | null
+  nextBtn: HTMLButtonElement | null
+  zoomedImg: HTMLImageElement | null
+  originalImg: HTMLImageElement | null
+  galleryList: HTMLImageElement[]
+  galleryIndex: number
+  isClosing: boolean
+}
+
+let zoomController: AbortController | null = null
+const state: ZoomState = {
+  overlay: null,
+  bar: null,
+  captionEl: null,
+  countEl: null,
+  prevBtn: null,
+  nextBtn: null,
+  zoomedImg: null,
+  originalImg: null,
+  galleryList: [],
+  galleryIndex: 0,
+  isClosing: false,
+}
+
+function getGallerySiblings(img: HTMLImageElement): HTMLImageElement[] {
+  const group = img.dataset.galleryGroup
+  if (!group) {
+    return []
+  }
+  const container = img.closest('.gallery-container') || document
+  const candidates = Array.from(container.querySelectorAll<HTMLImageElement>(`img[data-gallery-group="${group}"]`))
+  // For Focal Stage galleries, only enumerate thumbnail images (avoid counting the hero image twice)
+  const stageThumbs = candidates.filter(el => el.closest('.img-thumb-btn'))
+  return stageThumbs.length > 0 ? stageThumbs : candidates
+}
+
+function updateZoomBar(caption: string) {
+  if (!state.bar || !state.captionEl || !state.countEl || !state.prevBtn || !state.nextBtn) {
+    return
+  }
+  state.captionEl.textContent = caption
+  const hasGallery = state.galleryList.length > 1
+  state.prevBtn.hidden = !hasGallery
+  state.nextBtn.hidden = !hasGallery
+  state.countEl.hidden = !hasGallery
+  if (hasGallery) {
+    state.countEl.textContent = `${state.galleryIndex + 1} / ${state.galleryList.length}`
+  }
+  state.bar.style.display = caption || hasGallery ? 'flex' : 'flex'
+}
+
+function zoomOutImmediate() {
+  if (state.zoomedImg) {
+    state.zoomedImg.remove()
+    state.zoomedImg = null
+  }
+  if (state.originalImg) {
+    state.originalImg.style.visibility = ''
+    state.originalImg = null
+  }
+  if (state.overlay) {
+    state.overlay.style.display = 'none'
+    state.overlay.style.opacity = '0'
+  }
+  if (state.bar) {
+    state.bar.style.display = 'none'
+    state.bar.removeAttribute('data-open')
+  }
+  document.body.style.overflow = ''
+  state.isClosing = false
+}
+
+function zoomOut() {
+  if (!state.overlay || !state.zoomedImg || state.isClosing) {
+    return
+  }
+  state.isClosing = true
+  const zoomed = state.zoomedImg
+  const original = state.originalImg
+
+  zoomed.style.transform = ''
+  state.overlay.style.opacity = '0'
+  state.bar?.removeAttribute('data-open')
+  document.body.style.overflow = ''
+
+  let done = false
+  const finish = () => {
+    if (done) {
+      return
+    }
+    done = true
+    zoomed.remove()
+    if (state.zoomedImg === zoomed) {
+      state.zoomedImg = null
+    }
+    if (original) {
+      original.style.visibility = ''
+      original.focus()
+    }
+    if (state.originalImg === original) {
+      state.originalImg = null
+    }
+    if (state.overlay) {
+      state.overlay.style.display = 'none'
+    }
+    if (state.bar) {
+      state.bar.style.display = 'none'
+    }
+    state.isClosing = false
+  }
+
+  const reducedMotion = document.documentElement.classList.contains('reduce-motion')
+    || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (reducedMotion) {
+    finish()
+    return
+  }
+
+  zoomed.addEventListener('transitionend', finish, { once: true })
+  window.setTimeout(finish, 320)
+}
+
+function computeCenterTransform(rect: DOMRect, naturalWidth: number) {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const maxFrac = vw < 768 ? 0.92 : 0.78
+  const bottomReserve = 84
+  const availableH = Math.max(200, vh - bottomReserve)
+  const fitScale = Math.min(
+    (vw * maxFrac) / rect.width,
+    (availableH * maxFrac) / rect.height,
+  )
+  const naturalCap = naturalWidth > 0 ? Math.max(1, (naturalWidth * 1.2) / rect.width) : fitScale
+  const scale = Math.min(fitScale, naturalCap)
+  const targetCenterY = (vh - bottomReserve + 16) / 2
+  const rectCenterX = rect.left + rect.width / 2
+  const rectCenterY = rect.top + rect.height / 2
+  const translateX = (vw / 2 - rectCenterX) / scale
+  const translateY = (targetCenterY - rectCenterY) / scale
+  return { scale, translateX, translateY }
+}
+
+function zoomIn(img: HTMLImageElement) {
+  if (!state.overlay || !state.bar) {
+    return
+  }
+
+  zoomOutImmediate()
+  const rect = img.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) {
+    return
+  }
+
+  const caption = img.dataset.caption || img.alt || ''
+  const siblings = getGallerySiblings(img)
+  const idxAttr = Number.parseInt(img.dataset.galleryIndex || '-1', 10)
+  const galleryIndex = Number.isNaN(idxAttr) || idxAttr < 0
+    ? Math.max(0, siblings.indexOf(img))
+    : Math.min(siblings.length - 1, idxAttr)
+
+  state.galleryList = siblings
+  state.galleryIndex = galleryIndex
+  state.originalImg = img
+  img.style.visibility = 'hidden'
+
+  const clone = img.cloneNode() as HTMLImageElement
+  clone.className = 'zoom-img'
+  clone.removeAttribute('id')
+  clone.removeAttribute('loading')
+  clone.style.top = `${rect.top}px`
+  clone.style.left = `${rect.left}px`
+  clone.style.width = `${rect.width}px`
+  clone.style.height = `${rect.height}px`
+  clone.style.visibility = 'visible'
+
+  state.zoomedImg = clone
+  document.body.appendChild(clone)
+  document.body.style.overflow = 'hidden'
+
+  state.overlay.style.display = 'block'
+  state.overlay.focus()
+  updateZoomBar(caption)
+
+  const { scale, translateX, translateY } = computeCenterTransform(rect, img.naturalWidth)
+  requestAnimationFrame(() => {
+    if (state.overlay) {
+      state.overlay.style.opacity = '1'
+    }
+    state.bar?.setAttribute('data-open', '')
+    clone.style.transform = `scale(${scale}) translate3d(${translateX}px, ${translateY}px, 0)`
+  })
+}
+
+function stepGallery(delta: number) {
+  if (!state.zoomedImg || state.galleryList.length <= 1) {
+    return
+  }
+  const nextIdx = (state.galleryIndex + delta + state.galleryList.length) % state.galleryList.length
+  const nextTarget = state.galleryList[nextIdx]
+  if (!nextTarget) {
+    return
+  }
+
+  if (state.originalImg) {
+    state.originalImg.style.visibility = ''
+  }
+
+  state.galleryIndex = nextIdx
+  if (nextTarget.closest('.img-thumb-btn')) {
+    const stageHero = nextTarget.closest('.gallery-container')?.querySelector<HTMLImageElement>('[data-stage-hero]')
+    if (stageHero) {
+      state.originalImg = stageHero
+      stageHero.style.visibility = 'hidden'
+    }
+    else {
+      state.originalImg = nextTarget
+    }
+  }
+  else {
+    state.originalImg = nextTarget
+    nextTarget.style.visibility = 'hidden'
+  }
+
+  const zoomed = state.zoomedImg
+  zoomed.setAttribute('data-swapping', '')
+  zoomed.style.transform = ''
+  zoomed.src = nextTarget.currentSrc || nextTarget.src
+  zoomed.alt = nextTarget.alt
+
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const maxFrac = vw < 768 ? 0.92 : 0.78
+  const bottomReserve = 84
+  const availableH = Math.max(200, vh - bottomReserve)
+  const ratio = (nextTarget.naturalWidth || 16) / (nextTarget.naturalHeight || 10)
+  let boxW = vw * maxFrac
+  let boxH = boxW / ratio
+  if (boxH > availableH * maxFrac) {
+    boxH = availableH * maxFrac
+    boxW = boxH * ratio
+  }
+  zoomed.style.width = `${boxW}px`
+  zoomed.style.height = `${boxH}px`
+  zoomed.style.left = `${(vw - boxW) / 2}px`
+  zoomed.style.top = `${(vh - bottomReserve + 16 - boxH) / 2}px`
+
+  const caption = nextTarget.dataset.caption || nextTarget.alt || ''
+  updateZoomBar(caption)
+
+  requestAnimationFrame(() => {
+    zoomed.removeAttribute('data-swapping')
+  })
+}
+
+function setupStageGalleries(signal: AbortSignal) {
+  const containers = Array.from(document.querySelectorAll<HTMLElement>('.gallery-container[data-gallery-mode="stage"]'))
+  for (const container of containers) {
+    const hero = container.querySelector<HTMLImageElement>('[data-stage-hero]')
+    const captionEl = container.querySelector<HTMLElement>('[data-stage-caption]')
+    const countEl = container.querySelector<HTMLElement>('[data-stage-count]')
+    const thumbs = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-stage-thumb]'))
+
+    if (!hero || !captionEl || !countEl || thumbs.length === 0) {
+      continue
+    }
+
+    thumbs.forEach((btn, idx) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        const thumbImg = btn.querySelector<HTMLImageElement>('img')
+        const nextSrc = thumbImg?.currentSrc || thumbImg?.src || ''
+        if (!nextSrc) {
+          return
+        }
+        const caption = btn.dataset.caption || thumbImg?.alt || ''
+        hero.src = nextSrc
+        hero.alt = thumbImg?.alt || caption
+        hero.dataset.caption = caption
+        hero.dataset.galleryIndex = String(idx)
+        captionEl.textContent = caption || `图 ${idx + 1}`
+        countEl.textContent = `${idx + 1} / ${thumbs.length}`
+        thumbs.forEach((other, j) => {
+          other.toggleAttribute('data-active', j === idx)
+          other.setAttribute('aria-selected', j === idx ? 'true' : 'false')
+        })
+      }, { signal })
+    })
+  }
+}
+
+function setupZoomPage() {
+  zoomController?.abort()
+  zoomController = new AbortController()
+  const { signal } = zoomController
+
+  document.querySelectorAll('.zoom-overlay, .zoom-bar').forEach(el => el.remove())
+
+  const overlay = document.createElement('div')
+  overlay.className = 'zoom-overlay'
+  overlay.setAttribute('role', 'dialog')
+  overlay.setAttribute('aria-modal', 'true')
+  overlay.setAttribute('aria-label', 'Image Viewer')
+  overlay.setAttribute('tabindex', '-1')
+
+  const bar = document.createElement('div')
+  bar.className = 'zoom-bar'
+
+  const captionEl = document.createElement('p')
+  captionEl.className = 'zoom-caption'
+
+  const meta = document.createElement('div')
+  meta.className = 'zoom-meta'
+
+  const prevBtn = document.createElement('button')
+  prevBtn.type = 'button'
+  prevBtn.className = 'zoom-nav'
+  prevBtn.textContent = '‹'
+  prevBtn.setAttribute('aria-label', '上一张')
+
+  const countEl = document.createElement('span')
+  countEl.className = 'zoom-count'
+
+  const nextBtn = document.createElement('button')
+  nextBtn.type = 'button'
+  nextBtn.className = 'zoom-nav'
+  nextBtn.textContent = '›'
+  nextBtn.setAttribute('aria-label', '下一张')
+
+  const escHint = document.createElement('span')
+  escHint.className = 'zoom-esc'
+  escHint.textContent = 'Esc 关闭'
+
+  meta.append(prevBtn, countEl, nextBtn, escHint)
+  bar.append(captionEl, meta)
+  document.body.append(overlay, bar)
+
+  state.overlay = overlay
+  state.bar = bar
+  state.captionEl = captionEl
+  state.countEl = countEl
+  state.prevBtn = prevBtn
+  state.nextBtn = nextBtn
+
+  prevBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    stepGallery(-1)
+  }, { signal })
+
+  nextBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    stepGallery(1)
+  }, { signal })
+
+  setupStageGalleries(signal)
+
+  document.addEventListener('click', (event) => {
+    const target = event.target
+    if (!(target instanceof Element)) {
+      return
+    }
+
+    if (state.zoomedImg) {
+      if (target.closest('.zoom-bar')) {
+        return
+      }
+      zoomOut()
+      return
+    }
+
+    if (!(target instanceof HTMLImageElement)) {
+      return
+    }
+    if (!target.closest('.heti') || target.closest('.no-heti') || target.classList.contains('no-heti')) {
+      return
+    }
+    if (target.closest('.img-thumb-btn')) {
+      return
+    }
+    if (!target.complete || target.width < 80 || target.height < 80) {
+      return
+    }
+
+    event.preventDefault()
+    zoomIn(target)
+  }, { signal })
+
+  document.addEventListener('keydown', (e) => {
+    if (!state.zoomedImg) {
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      zoomOut()
+      return
+    }
+    if (state.galleryList.length > 1 && e.key === 'ArrowRight') {
+      e.preventDefault()
+      stepGallery(1)
+      return
+    }
+    if (state.galleryList.length > 1 && e.key === 'ArrowLeft') {
+      e.preventDefault()
+      stepGallery(-1)
+    }
+  }, { signal })
+
+  window.addEventListener('wheel', (e) => {
+    if (state.zoomedImg && Math.abs(e.deltaY) > 36) {
+      zoomOut()
+    }
+  }, { passive: true, signal })
+
+  window.addEventListener('resize', () => zoomOut(), { signal })
+
+  signal.addEventListener('abort', () => {
+    zoomOutImmediate()
+    overlay.remove()
+    bar.remove()
+    state.overlay = null
+    state.bar = null
+  })
+}
+
+document.addEventListener('astro:page-load', setupZoomPage)
+document.addEventListener('astro:before-swap', () => {
+  zoomController?.abort()
+  zoomController = null
+})
+</script>
