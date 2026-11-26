@@ -3,6 +3,7 @@ title: Gemini VS GPT - 个人看法
 published: 2026-11-26
 tags:
   - 随笔
+pin: 1
 lang: zh
 abbrlink: gemini-vs-gpt
 ---
