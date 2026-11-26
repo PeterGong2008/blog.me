@@ -220,9 +220,12 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
       const selIdx = selectedPaths.indexOf(item.repoPath)
       const isSelected = selIdx >= 0
       const used = isMediaUsed(item)
-      const badgeClass = used
-        ? 'bg-emerald-500/15 c-emerald-700 dark:c-emerald-400'
-        : 'bg-secondary/10 c-secondary/75'
+      const badgeClass = item.pending
+        ? 'bg-amber-500/15 c-amber-700 dark:c-amber-400'
+        : used
+          ? 'bg-emerald-500/15 c-emerald-700 dark:c-emerald-400'
+          : 'bg-secondary/10 c-secondary/75'
+      const badgeLabel = item.pending ? '待提交' : used ? '已用' : '未用'
       const cardRing = isSelected
         ? 'border-primary/70 ring-2 ring-highlight'
         : 'border-secondary/15 hover:border-primary/35'
@@ -240,12 +243,12 @@ export function initAdminMediaUI(options: AdminMediaUIOptions): AdminMediaUIHand
             ${isSelected ? `#${selIdx + 1}` : '选择'}
           </span>
           ${!used
-            ? `<button type="button" data-delete-media="${escapeHtml(item.repoPath)}" class="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white op-0 transition-opacity group-hover:op-100 hover:bg-red-600" title="永久删除未引用的图片文件">删除</button>`
+            ? `<button type="button" data-delete-media="${escapeHtml(item.repoPath)}" class="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white op-0 transition-opacity group-hover:op-100 hover:bg-red-600" title="${item.pending ? '撤销暂存的待提交图片' : '永久删除未引用的图片文件'}">${item.pending ? '撤销' : '删除'}</button>`
             : ''}
         </div>
         <div class="flex items-center justify-between gap-2 px-2.5 py-1.5">
           <span class="min-w-0 truncate text-[11px] c-primary" title="${escapeHtml(item.repoPath)}">${escapeHtml(item.filename)}</span>
-          <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] ${badgeClass}">${used ? '已用' : '未用'}</span>
+          <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] ${badgeClass}">${badgeLabel}</span>
         </div>
         <div class="px-2.5 pb-2 text-[10px] c-secondary/65 font-mono">${formatFileSize(item.size)}</div>
       </div>`

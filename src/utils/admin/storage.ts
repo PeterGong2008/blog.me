@@ -23,6 +23,7 @@ export interface ImageUploadResult {
   repoPath: string
   markdownPath: string
   previewUrl: string
+  pending?: boolean
 }
 
 export interface AdminMediaItem {
@@ -31,6 +32,7 @@ export interface AdminMediaItem {
   size: number
   mtimeMs?: number
   previewUrl: string
+  pending?: boolean
 }
 
 export interface GitHubConfig {
@@ -55,9 +57,14 @@ export interface StorageAdapter {
   deleteMedia: (repoPath: string) => Promise<void>
   resolveImagePreviewUrl: (src: string, postPath: string) => Promise<string | null>
   formatBody?: (body: string) => Promise<string>
+  getPendingUploadCount?: () => number
+  clearPendingUploads?: () => void
+  getActionsUrl?: () => string | null
 }
 
 const GITHUB_STORAGE_KEY = 'retypeset-admin-github-config'
+const IMAGE_MAX_DIMENSION = 2400
+const IMAGE_SKIP_SIZE_BYTES = 1.2 * 1024 * 1024
 
 export function loadGitHubConfig(): GitHubConfig {
   try {
@@ -148,6 +155,82 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
+async function loadImageFallback(file: File): Promise<{ width: number, height: number, draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void, cleanup: () => void }> {
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file)
+    return {
+      width: bitmap.width,
+      height: bitmap.height,
+      draw: (ctx, w, h) => ctx.drawImage(bitmap, 0, 0, w, h),
+      cleanup: () => bitmap.close(),
+    }
+  }
+
+  return await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      resolve({
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+        draw: (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h),
+        cleanup: () => URL.revokeObjectURL(url),
+      })
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('解码图片失败'))
+    }
+    img.src = url
+  })
+}
+
+export async function optimizeImageBeforeUpload(file: File): Promise<File> {
+  const lowerName = (file.name || '').toLowerCase()
+  if (file.type === 'image/svg+xml' || file.type === 'image/gif' || /\.(?:svg|gif)$/i.test(lowerName)) {
+    return file
+  }
+
+  let decoded: Awaited<ReturnType<typeof loadImageFallback>> | null = null
+  try {
+    decoded = await loadImageFallback(file)
+    const maxSide = Math.max(decoded.width, decoded.height)
+    if (file.size <= IMAGE_SKIP_SIZE_BYTES && maxSide <= IMAGE_MAX_DIMENSION) {
+      return file
+    }
+
+    const scale = maxSide > IMAGE_MAX_DIMENSION ? IMAGE_MAX_DIMENSION / maxSide : 1
+    const targetW = Math.max(1, Math.round(decoded.width * scale))
+    const targetH = Math.max(1, Math.round(decoded.height * scale))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = targetW
+    canvas.height = targetH
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      return file
+    }
+    decoded.draw(ctx, targetW, targetH)
+
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/webp', 0.88))
+    if (!blob || blob.size >= file.size) {
+      return file
+    }
+
+    const stem = (file.name || `image-${Date.now()}`).replace(/\.[^.]+$/, '')
+    return new File([blob], `${stem}.webp`, {
+      type: 'image/webp',
+      lastModified: file.lastModified || Date.now(),
+    })
+  }
+  catch {
+    return file
+  }
+  finally {
+    decoded?.cleanup()
+  }
+}
+
 export class LocalStorageAdapter implements StorageAdapter {
   mode = 'local' as const
 
@@ -233,12 +316,13 @@ export class LocalStorageAdapter implements StorageAdapter {
   }
 
   async uploadImage(file: File, postPath: string): Promise<ImageUploadResult> {
-    const dataBase64 = await fileToBase64(file)
+    const optimized = await optimizeImageBeforeUpload(file)
+    const dataBase64 = await fileToBase64(optimized)
     const res = await fetch('/__admin_api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        filename: file.name || `image-${Date.now()}.png`,
+        filename: optimized.name || `image-${Date.now()}.png`,
         dataBase64,
         postPath,
       }),
@@ -257,6 +341,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       repoPath: data.repoPath,
       markdownPath: data.markdownPath,
       previewUrl: data.previewUrl,
+      pending: false,
     }
   }
 
@@ -307,11 +392,21 @@ export class LocalStorageAdapter implements StorageAdapter {
   }
 }
 
+interface PendingGitHubUpload {
+  repoPath: string
+  filename: string
+  size: number
+  base64Data: string
+  previewUrl: string
+}
+
 export class GitHubStorageAdapter implements StorageAdapter {
   mode = 'github' as const
   private config: GitHubConfig
   private shaCache = new Map<string, string>()
+  private fileContentCache = new Map<string, { content: string, sha: string }>()
   private mediaUrlCache = new Map<string, string>()
+  private pendingUploads = new Map<string, PendingGitHubUpload>()
 
   constructor(config: GitHubConfig) {
     this.config = {
@@ -335,7 +430,12 @@ export class GitHubStorageAdapter implements StorageAdapter {
       throw new Error('请先在 GitHub 设置中填写仓库信息与 Fine-Grained Token')
     }
 
-    const url = `https://api.github.com/repos/${encodeURIComponent(this.config.owner)}/${encodeURIComponent(this.config.repo)}${apiPath}`
+    const method = (init.method || 'GET').toUpperCase()
+    const cacheBustedPath = method === 'GET'
+      ? `${apiPath}${apiPath.includes('?') ? '&' : '?'}_t=${Date.now()}`
+      : apiPath
+    const url = `https://api.github.com/repos/${encodeURIComponent(this.config.owner)}/${encodeURIComponent(this.config.repo)}${cacheBustedPath}`
+
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${this.config.token}`)
     headers.set('Accept', 'application/vnd.github+json')
@@ -362,6 +462,25 @@ export class GitHubStorageAdapter implements StorageAdapter {
     return await res.json() as T
   }
 
+  getPendingUploadCount(): number {
+    return this.pendingUploads.size
+  }
+
+  clearPendingUploads(): void {
+    for (const item of this.pendingUploads.values()) {
+      URL.revokeObjectURL(item.previewUrl)
+      this.mediaUrlCache.delete(item.repoPath)
+    }
+    this.pendingUploads.clear()
+  }
+
+  getActionsUrl(): string | null {
+    if (!this.config.owner || !this.config.repo) {
+      return null
+    }
+    return `https://github.com/${encodeURIComponent(this.config.owner)}/${encodeURIComponent(this.config.repo)}/actions`
+  }
+
   async verifyConnection(): Promise<{ fullName: string, canPush: boolean, defaultBranch: string }> {
     const repoInfo = await this.request<{
       full_name: string
@@ -376,10 +495,10 @@ export class GitHubStorageAdapter implements StorageAdapter {
   }
 
   async listFiles(): Promise<AdminFileSummary[]> {
-    const branchRef = encodeURIComponent(this.config.branch)
+    const refData = await this.request<{ object: { sha: string } }>(`/git/ref/heads/${encodeURIComponent(this.config.branch)}`)
     const tree = await this.request<{
       tree: Array<{ path: string, type: string, sha: string }>
-    }>(`/git/trees/${branchRef}?recursive=1`)
+    }>(`/git/trees/${refData.object.sha}?recursive=1`)
 
     const mdEntries = tree.tree.filter((item) => {
       if (item.type !== 'blob') {
@@ -397,6 +516,22 @@ export class GitHubStorageAdapter implements StorageAdapter {
       const batchData = await Promise.all(
         batch.map(async (entry) => {
           this.shaCache.set(entry.path, entry.sha)
+          const cached = this.fileContentCache.get(entry.path)
+          if (cached && cached.sha === entry.sha) {
+            const kind = getKindFromPath(entry.path)
+            const parsed = parseMarkdownFile(cached.content, kind)
+            if (!parsed.meta.title && kind === 'post') {
+              parsed.meta.title = entry.path.split('/').pop()?.replace(/\.(?:md|mdx)$/i, '') || entry.path
+            }
+            return {
+              path: entry.path,
+              kind,
+              meta: parsed.meta,
+              sha: entry.sha,
+            } satisfies AdminFileSummary
+          }
+
+          this.fileContentCache.delete(entry.path)
           const file = await this.readFile(entry.path)
           if (!file.meta.title && file.kind === 'post') {
             file.meta.title = entry.path.split('/').pop()?.replace(/\.(?:md|mdx)$/i, '') || entry.path
@@ -416,6 +551,20 @@ export class GitHubStorageAdapter implements StorageAdapter {
   }
 
   async readFile(filePath: string): Promise<AdminFileData> {
+    const memCached = this.fileContentCache.get(filePath)
+    if (memCached) {
+      const kind = getKindFromPath(filePath)
+      const parsed = parseMarkdownFile(memCached.content, kind)
+      return {
+        path: filePath,
+        kind,
+        content: memCached.content,
+        meta: parsed.meta,
+        body: parsed.body,
+        sha: memCached.sha,
+      }
+    }
+
     const encoded = this.encodeRepoPath(filePath)
     const ref = encodeURIComponent(this.config.branch)
     const data = await this.request<{
@@ -426,12 +575,23 @@ export class GitHubStorageAdapter implements StorageAdapter {
     }>(`/contents/${encoded}?ref=${ref}`)
 
     this.shaCache.set(filePath, data.sha)
-    const rawText = data.content ? base64ToUtf8(data.content) : ''
-    const kind = getKindFromPath(filePath)
+    let rawText = ''
+    if (data.content) {
+      rawText = base64ToUtf8(data.content)
+    }
+    else if (data.sha) {
+      const blobData = await this.request<{ content?: string }>(`/git/blobs/${data.sha}`)
+      rawText = blobData.content ? base64ToUtf8(blobData.content) : ''
+    }
+
+    const resolvedPath = data.path || filePath
+    this.fileContentCache.set(resolvedPath, { content: rawText, sha: data.sha })
+
+    const kind = getKindFromPath(resolvedPath)
     const parsed = parseMarkdownFile(rawText, kind)
 
     return {
-      path: data.path || filePath,
+      path: resolvedPath,
       kind,
       content: rawText,
       meta: parsed.meta,
@@ -457,39 +617,125 @@ export class GitHubStorageAdapter implements StorageAdapter {
     }
   }
 
+  private async commitAtomic(
+    writes: Array<{ path: string, base64Content: string, rawText?: string }>,
+    deletes: string[],
+    commitMessage: string,
+  ): Promise<Map<string, string>> {
+    const encodedBranch = encodeURIComponent(this.config.branch)
+    const refData = await this.request<{ object: { sha: string } }>(`/git/ref/heads/${encodedBranch}`)
+    const headSha = refData.object.sha
+
+    const commitData = await this.request<{ tree: { sha: string } }>(`/git/commits/${headSha}`)
+    const baseTreeSha = commitData.tree.sha
+
+    const createdBlobs = await Promise.all(
+      writes.map(async (item) => {
+        const blob = await this.request<{ sha: string }>('/git/blobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: item.base64Content,
+            encoding: 'base64',
+          }),
+        })
+        return { ...item, sha: blob.sha }
+      }),
+    )
+
+    const treeEntries: Array<{ path: string, mode: '100644', type: 'blob', sha: string | null }> = [
+      ...createdBlobs.map(item => ({
+        path: item.path,
+        mode: '100644' as const,
+        type: 'blob' as const,
+        sha: item.sha,
+      })),
+      ...deletes.map(delPath => ({
+        path: delPath,
+        mode: '100644' as const,
+        type: 'blob' as const,
+        sha: null,
+      })),
+    ]
+
+    const treeRes = await this.request<{ sha: string }>('/git/trees', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: treeEntries,
+      }),
+    })
+
+    const newCommitRes = await this.request<{ sha: string }>('/git/commits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: commitMessage,
+        tree: treeRes.sha,
+        parents: [headSha],
+      }),
+    })
+
+    await this.request(`/git/refs/heads/${encodedBranch}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sha: newCommitRes.sha,
+        force: false,
+      }),
+    })
+
+    const shaResult = new Map<string, string>()
+    for (const item of createdBlobs) {
+      this.shaCache.set(item.path, item.sha)
+      shaResult.set(item.path, item.sha)
+      if (typeof item.rawText === 'string') {
+        this.fileContentCache.set(item.path, { content: item.rawText, sha: item.sha })
+      }
+    }
+    for (const delPath of deletes) {
+      this.shaCache.delete(delPath)
+      this.fileContentCache.delete(delPath)
+    }
+
+    return shaResult
+  }
+
   async saveFile(
     filePath: string,
     content: string,
     opts?: { oldPath?: string, commitMessage?: string },
   ): Promise<{ path: string, sha?: string }> {
-    const encoded = this.encodeRepoPath(filePath)
-    const existingSha = await this.getRemoteShaIfExists(filePath)
+    const writes: Array<{ path: string, base64Content: string, rawText?: string }> = [
+      {
+        path: filePath,
+        base64Content: utf8ToBase64(content),
+        rawText: content,
+      },
+    ]
 
-    const payload: Record<string, string> = {
-      message: opts?.commitMessage || (existingSha ? `post: update ${filePath}` : `post: create ${filePath}`),
-      content: utf8ToBase64(content),
-      branch: this.config.branch,
-    }
-    if (existingSha) {
-      payload.sha = existingSha
-    }
-
-    const res = await this.request<{ content: { path: string, sha: string } }>(`/contents/${encoded}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-
-    const savedPath = res.content.path || filePath
-    this.shaCache.set(savedPath, res.content.sha)
-
-    if (opts?.oldPath && opts.oldPath !== savedPath && opts.oldPath.startsWith('src/content/posts/')) {
-      await this.deleteFile(opts.oldPath, {
-        commitMessage: `post: remove old path ${opts.oldPath}`,
-      }).catch(() => {})
+    for (const pending of this.pendingUploads.values()) {
+      writes.push({
+        path: pending.repoPath,
+        base64Content: pending.base64Data,
+      })
     }
 
-    return { path: savedPath, sha: res.content.sha }
+    const deletes: string[] = []
+    if (opts?.oldPath && opts.oldPath !== filePath && opts.oldPath.startsWith('src/content/posts/')) {
+      deletes.push(opts.oldPath)
+    }
+
+    const commitMsg = opts?.commitMessage || `post: save ${filePath}`
+    const shaMap = await this.commitAtomic(writes, deletes, commitMsg)
+
+    this.pendingUploads.clear()
+
+    return {
+      path: filePath,
+      sha: shaMap.get(filePath),
+    }
   }
 
   async deleteFile(filePath: string, opts?: { commitMessage?: string }): Promise<void> {
@@ -513,16 +759,18 @@ export class GitHubStorageAdapter implements StorageAdapter {
     })
 
     this.shaCache.delete(filePath)
+    this.fileContentCache.delete(filePath)
   }
 
   async uploadImage(file: File, postPath: string): Promise<ImageUploadResult> {
-    if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+    const optimized = await optimizeImageBeforeUpload(file)
+    if (optimized.size === 0 || optimized.size > 10 * 1024 * 1024) {
       throw new Error('图片大小需在 1B 到 10MB 之间')
     }
 
-    const extMatch = (file.name || '').match(/\.(png|jpg|jpeg|webp|gif|svg|avif)$/i)
+    const extMatch = (optimized.name || '').match(/\.(png|jpg|jpeg|webp|gif|svg|avif)$/i)
     const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '.png'
-    const rawStem = (file.name || 'image').replace(/\.[^.]+$/, '')
+    const rawStem = (optimized.name || 'image').replace(/\.[^.]+$/, '')
     const stem = rawStem
       .replace(/[^\w\u4E00-\u9FA5-]+/g, '-')
       .replace(/^-+|-+$/g, '')
@@ -530,32 +778,37 @@ export class GitHubStorageAdapter implements StorageAdapter {
 
     const uniqueName = `${stem}-${Date.now().toString(36)}${ext}`
     const repoPath = `src/content/posts/_images/${uniqueName}`
-    const base64Data = await fileToBase64(file)
-    const encoded = this.encodeRepoPath(repoPath)
+    const base64Data = await fileToBase64(optimized)
+    const previewUrl = URL.createObjectURL(optimized)
 
-    const res = await this.request<{ content: { path: string, sha: string } }>(`/contents/${encoded}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: `assets: upload ${uniqueName}`,
-        content: base64Data,
-        branch: this.config.branch,
-      }),
-    })
-
-    this.shaCache.set(repoPath, res.content.sha)
-    const previewUrl = URL.createObjectURL(file)
     this.mediaUrlCache.set(repoPath, previewUrl)
+    this.pendingUploads.set(repoPath, {
+      repoPath,
+      filename: uniqueName,
+      size: optimized.size,
+      base64Data,
+      previewUrl,
+    })
 
     return {
       repoPath,
       markdownPath: computeRelativeImagePath(postPath, repoPath),
       previewUrl,
+      pending: true,
     }
   }
 
   async listMedia(): Promise<AdminMediaItem[]> {
+    const pendingItems: AdminMediaItem[] = Array.from(this.pendingUploads.values()).map(item => ({
+      repoPath: item.repoPath,
+      filename: item.filename,
+      size: item.size,
+      previewUrl: item.previewUrl,
+      pending: true,
+    }))
+
     const ref = encodeURIComponent(this.config.branch)
+    let remoteItems: AdminMediaItem[] = []
     try {
       const entries = await this.request<Array<{
         name: string
@@ -565,7 +818,7 @@ export class GitHubStorageAdapter implements StorageAdapter {
         type: string
       }>>(`/contents/src/content/posts/_images?ref=${ref}`)
 
-      return entries
+      remoteItems = entries
         .filter(item => item.type === 'file' && /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(item.name))
         .map((item) => {
           this.shaCache.set(item.path, item.sha)
@@ -574,21 +827,33 @@ export class GitHubStorageAdapter implements StorageAdapter {
             filename: item.name,
             size: item.size,
             previewUrl: this.mediaUrlCache.get(item.path) || '',
+            pending: false,
           }
         })
     }
     catch (err) {
-      if (err instanceof Error && err.message.includes('(404)')) {
-        return []
+      if (!(err instanceof Error && err.message.includes('(404)'))) {
+        throw err
       }
-      throw err
     }
+
+    const seen = new Set(pendingItems.map(i => i.repoPath))
+    return [...pendingItems, ...remoteItems.filter(i => !seen.has(i.repoPath))]
   }
 
   async deleteMedia(repoPath: string): Promise<void> {
     if (!repoPath.startsWith('src/content/posts/_images/')) {
       throw new Error('仅允许删除 src/content/posts/_images/ 下的图片资源')
     }
+
+    const pendingItem = this.pendingUploads.get(repoPath)
+    if (pendingItem) {
+      URL.revokeObjectURL(pendingItem.previewUrl)
+      this.pendingUploads.delete(repoPath)
+      this.mediaUrlCache.delete(repoPath)
+      return
+    }
+
     const sha = await this.getRemoteShaIfExists(repoPath)
     if (!sha) {
       throw new Error(`未找到远端图片 SHA: ${repoPath}`)
@@ -626,10 +891,18 @@ export class GitHubStorageAdapter implements StorageAdapter {
     try {
       const encoded = this.encodeRepoPath(repoPath)
       const ref = encodeURIComponent(this.config.branch)
-      const data = await this.request<{ content?: string }>(`/contents/${encoded}?ref=${ref}`)
-      if (!data.content) {
+      const data = await this.request<{ sha?: string, content?: string }>(`/contents/${encoded}?ref=${ref}`)
+
+      let base64Content = data.content || ''
+      if (!base64Content && data.sha) {
+        this.shaCache.set(repoPath, data.sha)
+        const blobData = await this.request<{ content?: string }>(`/git/blobs/${data.sha}`)
+        base64Content = blobData.content || ''
+      }
+      if (!base64Content) {
         return null
       }
+
       const ext = repoPath.split('.').pop()?.toLowerCase() || 'png'
       const mimeMap: Record<string, string> = {
         png: 'image/png',
@@ -640,7 +913,7 @@ export class GitHubStorageAdapter implements StorageAdapter {
         svg: 'image/svg+xml',
         avif: 'image/avif',
       }
-      const bytes = base64ToBytes(data.content)
+      const bytes = base64ToBytes(base64Content)
       const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
       const blob = new Blob([arrayBuffer], { type: mimeMap[ext] || 'image/png' })
       const blobUrl = URL.createObjectURL(blob)

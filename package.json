@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "astro check && astro dev",
     "build": "astro check && astro build && pnpm apply-lqip",
+    "build:ci": "astro build && pnpm apply-lqip",
     "preview": "astro preview",
     "astro": "astro",
     "lint": "eslint .",

@@ -89,6 +89,7 @@ export function initAdminApp(): void {
   const sidebarEl = qs<HTMLElement>('admin-sidebar')
   const toggleSidebarBtn = qs<HTMLButtonElement>('btn-toggle-sidebar')
   const modeBadgeBtn = qs<HTMLButtonElement>('btn-mode-badge')
+  const ghActionsLink = qs<HTMLAnchorElement>('link-gh-actions')
   const modeLabelEl = qs<HTMLElement>('mode-label')
   const modeDotEl = qs<HTMLElement>('mode-dot')
   const activeFilePathEl = qs<HTMLElement>('active-file-path')
@@ -185,6 +186,7 @@ export function initAdminApp(): void {
   let newPathManual = false
   let renameSourcePath: string | null = null
   let mediaUI: AdminMediaUIHandle | null = null
+  const draftFiles = new Map<string, AdminFileData>()
 
   function showToast(message: string, tone: 'info' | 'success' | 'error' = 'info'): void {
     toastEl.textContent = message
@@ -237,13 +239,25 @@ export function initAdminApp(): void {
 
   function updateModeUI(): void {
     const isGitHub = state.adapter?.mode === 'github'
+    const pendingCount = isGitHub ? (state.adapter?.getPendingUploadCount?.() ?? 0) : 0
+    const actionsUrl = isGitHub ? (state.adapter?.getActionsUrl?.() || '') : ''
+
     modeLabelEl.textContent = isGitHub ? 'GitHub 模式' : '本地模式'
     modeDotEl.classList.toggle('bg-emerald-500', !isGitHub)
     modeDotEl.classList.toggle('bg-amber-500', isGitHub)
+
+    if (actionsUrl) {
+      ghActionsLink.href = actionsUrl
+      ghActionsLink.classList.remove('hidden')
+    }
+    else {
+      ghActionsLink.classList.add('hidden')
+    }
+
     saveBtn.textContent = state.saving
       ? '保存中...'
       : isGitHub
-        ? '提交发布'
+        ? (pendingCount > 0 ? `提交发布 (含 ${pendingCount} 图)` : '提交发布')
         : '保存'
     formatBtn.classList.toggle('hidden', !(state.adapter?.formatBody))
     ghSwitchLocalBtn.classList.toggle('hidden', !state.localAvailable)
@@ -494,10 +508,11 @@ export function initAdminApp(): void {
     }
 
     try {
-      const data: AdminFileData = await state.adapter.readFile(filePath)
+      const memDraft = draftFiles.get(filePath)
+      const data: AdminFileData = memDraft ?? await state.adapter.readFile(filePath)
       state.activePath = data.path
       state.activeKind = data.kind
-      state.meta = data.meta
+      state.meta = { ...data.meta, tags: [...data.meta.tags], extra: { ...data.meta.extra } }
       state.body = data.body
       activeFilePathEl.textContent = data.path
       workspaceEmptyEl.classList.add('hidden')
@@ -509,7 +524,7 @@ export function initAdminApp(): void {
       mediaUI?.closeInspector()
       syncMetaToInputs()
       updateWordCount()
-      setDirty(false)
+      setDirty(Boolean(memDraft))
       renderFileLists()
       await renderPreviewNow()
     }
@@ -545,7 +560,15 @@ export function initAdminApp(): void {
       return false
     }
 
+    state.body = bodyTextarea.value
     readInputsToMeta()
+    const pendingCount = state.adapter.getPendingUploadCount?.() ?? 0
+    const isDraftNew = draftFiles.has(state.activePath)
+    if (!state.dirty && !isDraftNew && pendingCount === 0) {
+      showToast('当前内容无改动，无需重复提交', 'info')
+      return true
+    }
+
     const errors = validatePostMeta(state.meta, state.activeKind)
     if (errors.length > 0) {
       showToast(errors[0], 'error')
@@ -596,9 +619,16 @@ export function initAdminApp(): void {
       }
 
       setDirty(false)
+      draftFiles.delete(state.activePath)
       renderFileLists()
       updatePostActionButtons()
-      showToast(state.adapter.mode === 'github' ? '已提交到 GitHub（Actions 将自动构建）' : '已保存到本地文件', 'success')
+      updateModeUI()
+      showToast(
+        state.adapter.mode === 'github'
+          ? '已一次提交到 GitHub（可点击右上角「部署进度 ↗」查看构建）'
+          : '已保存到本地文件',
+        'success',
+      )
       return true
     }
     catch (err) {
@@ -622,7 +652,12 @@ export function initAdminApp(): void {
     }
 
     try {
-      await state.adapter.deleteFile(targetPath, { commitMessage: `post: delete ${title}` })
+      if (draftFiles.has(targetPath)) {
+        draftFiles.delete(targetPath)
+      }
+      else {
+        await state.adapter.deleteFile(targetPath, { commitMessage: `post: delete ${title}` })
+      }
       state.files = state.files.filter(f => f.path !== targetPath)
       if (state.activePath === targetPath) {
         state.activePath = null
@@ -864,10 +899,14 @@ export function initAdminApp(): void {
     }
 
     const uploadedLines: string[] = []
+    let hasPendingUpload = false
     for (const file of imageFiles) {
       try {
-        showToast(`正在上传图片 ${file.name || 'image'}...`, 'info')
+        showToast(`正在处理并上传图片 ${file.name || 'image'}...`, 'info')
         const res = await state.adapter.uploadImage(file, state.activePath)
+        if (res.pending) {
+          hasPendingUpload = true
+        }
         const alt = (file.name || '图片').replace(/\.[^.]+$/, '')
         uploadedLines.push(`![${alt}](${res.markdownPath})`)
       }
@@ -876,13 +915,22 @@ export function initAdminApp(): void {
       }
     }
 
+    updateModeUI()
     if (uploadedLines.length === 1) {
       insertTextAtCursor(`${uploadedLines[0]}\n`, '', '')
-      showToast('图片已上传并插入正文', 'success')
+      showToast(
+        hasPendingUpload ? '图片已压缩暂存（将在点击「提交发布」时随文章一并提交）' : '图片已上传并插入正文',
+        'success',
+      )
     }
     else if (uploadedLines.length > 1) {
       insertTextAtCursor(`\n:::grid\n${uploadedLines.join('\n')}\n:::\n`, '', '')
-      showToast(`已上传 ${uploadedLines.length} 张图片并排入多宫格`, 'success')
+      showToast(
+        hasPendingUpload
+          ? `已压缩暂存 ${uploadedLines.length} 张图片并排入多宫格（提交发布时一次上传）`
+          : `已上传 ${uploadedLines.length} 张图片并排入多宫格`,
+        'success',
+      )
     }
   }
 
@@ -990,6 +1038,28 @@ export function initAdminApp(): void {
     meta.abbrlink = suggestSlug(title)
     const body = '在这里开始写正文……\n'
     const serialized = serializeMarkdownFile(meta, body, 'post')
+
+    if (state.adapter.mode === 'github') {
+      draftFiles.set(targetPath, {
+        path: targetPath,
+        kind: 'post',
+        content: serialized,
+        meta,
+        body,
+      })
+      state.files.push({
+        path: targetPath,
+        kind: 'post',
+        meta: { ...meta, tags: [...meta.tags], extra: { ...meta.extra } },
+      })
+      newModalEl.classList.add('hidden')
+      newModalEl.classList.remove('flex')
+      await openFile(targetPath, true)
+      bodyTextarea.focus()
+      bodyTextarea.setSelectionRange(0, bodyTextarea.value.length)
+      showToast('已在草稿区创建文章，写完后点击「提交发布」一次上线', 'success')
+      return
+    }
 
     try {
       await state.adapter.saveFile(targetPath, serialized, {
@@ -1338,6 +1408,8 @@ export function initAdminApp(): void {
       const gh = new GitHubStorageAdapter(cfg)
       await gh.verifyConnection()
       saveGitHubConfig(cfg)
+      state.adapter?.clearPendingUploads?.()
+      draftFiles.clear()
       state.adapter = gh
       state.activePath = null
       setDirty(false)
@@ -1355,6 +1427,8 @@ export function initAdminApp(): void {
     if (!state.localAvailable) {
       return
     }
+    state.adapter?.clearPendingUploads?.()
+    draftFiles.clear()
     state.adapter = new LocalStorageAdapter()
     state.activePath = null
     setDirty(false)
