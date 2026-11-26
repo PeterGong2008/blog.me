@@ -1,5 +1,5 @@
 import type { ContentKind, PostLang, PostMeta } from './frontmatter'
-import type { AdminMediaUIHandle } from './media-ui'
+import type { AdminMediaUIHandle, LibraryUploadSummary } from './media-ui'
 import type { AdminFileData, AdminFileSummary, StorageAdapter } from './storage'
 import { base } from '@/config'
 import {
@@ -98,6 +98,8 @@ export function initAdminApp(): void {
   const themeToggleBtn = qs<HTMLButtonElement>('btn-theme-toggle')
 
   const newPostOpenBtn = qs<HTMLButtonElement>('btn-new-post')
+  const globalMediaLibraryBtn = qs<HTMLButtonElement>('btn-global-media-library')
+  const emptyMediaLibraryBtn = qs<HTMLButtonElement>('btn-empty-media-library')
   const searchInput = qs<HTMLInputElement>('search-input')
   const filterBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-filter]'))
   const postListEl = qs<HTMLElement>('post-list')
@@ -889,26 +891,41 @@ export function initAdminApp(): void {
     schedulePreviewRender()
   }
 
-  async function uploadFilesToLibrary(files: FileList | File[]): Promise<string[]> {
+  async function uploadFilesToLibrary(files: FileList | File[]): Promise<LibraryUploadSummary> {
     if (!state.adapter) {
-      return []
+      return { repoPaths: [], newCount: 0, duplicateMatches: [] }
     }
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/') || /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(f.name))
     if (imageFiles.length === 0) {
-      return []
+      return { repoPaths: [], newCount: 0, duplicateMatches: [] }
     }
 
     const postPathHint = state.activePath || 'src/content/posts/placeholder.md'
-    const uploadedPaths: string[] = []
+    const repoPaths: string[] = []
+    let newCount = 0
+    const duplicateMatches: Array<{ fileName: string, existingName: string, repoPath: string }> = []
     let hasPendingUpload = false
+
     for (const file of imageFiles) {
       try {
-        showToast(`正在处理并上传图片 ${file.name || 'image'}...`, 'info')
+        showToast(`正在校验并处理图片 ${file.name || 'image'}...`, 'info')
         const res = await state.adapter.uploadImage(file, postPathHint)
-        if (res.pending) {
-          hasPendingUpload = true
+        if (!repoPaths.includes(res.repoPath)) {
+          repoPaths.push(res.repoPath)
         }
-        uploadedPaths.push(res.repoPath)
+        if (res.deduplicated) {
+          duplicateMatches.push({
+            fileName: file.name || 'image',
+            existingName: res.duplicateOf || res.repoPath.split('/').pop() || res.repoPath,
+            repoPath: res.repoPath,
+          })
+        }
+        else {
+          newCount += 1
+          if (res.pending) {
+            hasPendingUpload = true
+          }
+        }
       }
       catch (err) {
         showToast(err instanceof Error ? err.message : '图片上传失败', 'error')
@@ -916,15 +933,22 @@ export function initAdminApp(): void {
     }
 
     updateModeUI()
-    if (uploadedPaths.length > 0) {
+    if (newCount > 0 && duplicateMatches.length > 0) {
+      showToast(`已新增 ${newCount} 张到素材库，另 ${duplicateMatches.length} 张重复图已自动去重复用`, 'success')
+    }
+    else if (newCount === 0 && duplicateMatches.length > 0) {
+      const firstDup = duplicateMatches[0].existingName
+      showToast(`检测到内容重复，已直接复用已有素材「${firstDup}」`, 'info')
+    }
+    else if (newCount > 0) {
       showToast(
         hasPendingUpload
-          ? `已压缩暂存 ${uploadedPaths.length} 张图片到素材库，可按需选择插入（提交发布时一次上传）`
-          : `已上传 ${uploadedPaths.length} 张图片到素材库，可按需选择插入正文`,
+          ? `已压缩暂存 ${newCount} 张图片到素材库，可按需选择插入或直接提交新增`
+          : `已上传 ${newCount} 张图片到素材库，可按需选择插入正文`,
         'success',
       )
     }
-    return uploadedPaths
+    return { repoPaths, newCount, duplicateMatches }
   }
 
   async function handleImageFiles(files: FileList | File[]): Promise<void> {
@@ -938,12 +962,16 @@ export function initAdminApp(): void {
 
     const uploadedLines: string[] = []
     let hasPendingUpload = false
+    let dedupCount = 0
     for (const file of imageFiles) {
       try {
         showToast(`正在处理并上传图片 ${file.name || 'image'}...`, 'info')
         const res = await state.adapter.uploadImage(file, state.activePath)
         if (res.pending) {
           hasPendingUpload = true
+        }
+        if (res.deduplicated) {
+          dedupCount += 1
         }
         const alt = (file.name || '图片').replace(/\.[^.]+$/, '')
         uploadedLines.push(`![${alt}](${res.markdownPath})`)
@@ -957,16 +985,22 @@ export function initAdminApp(): void {
     if (uploadedLines.length === 1) {
       insertTextAtCursor(`${uploadedLines[0]}\n`, '', '')
       showToast(
-        hasPendingUpload ? '图片已压缩暂存（将在点击「提交发布」时随文章一并提交）' : '图片已上传并插入正文',
+        dedupCount > 0
+          ? '图片与已有素材内容一致，已自动去重复用并插入正文'
+          : hasPendingUpload
+            ? '图片已压缩暂存（将在点击「提交发布」时随文章一并提交）'
+            : '图片已上传并插入正文',
         'success',
       )
     }
     else if (uploadedLines.length > 1) {
       insertTextAtCursor(`\n:::grid\n${uploadedLines.join('\n')}\n:::\n`, '', '')
       showToast(
-        hasPendingUpload
-          ? `已压缩暂存 ${uploadedLines.length} 张图片并排入多宫格（提交发布时一次上传）`
-          : `已上传 ${uploadedLines.length} 张图片并排入多宫格`,
+        dedupCount > 0
+          ? `已排入 ${uploadedLines.length} 张图片到多宫格（其中 ${dedupCount} 张重复图已自动复用）`
+          : hasPendingUpload
+            ? `已压缩暂存 ${uploadedLines.length} 张图片并排入多宫格（提交发布时一次上传）`
+            : `已上传 ${uploadedLines.length} 张图片并排入多宫格`,
         'success',
       )
     }
@@ -990,7 +1024,19 @@ export function initAdminApp(): void {
   mediaUI = initAdminMediaUI({
     getAdapter: () => state.adapter,
     getActivePath: () => state.activePath,
+    getActiveTitle: () => {
+      if (state.activeKind === 'about') {
+        return state.meta.lang === 'en' ? 'About' : '关于'
+      }
+      return inputTitle.value.trim() || state.meta.title || state.activePath || ''
+    },
     getBody: () => state.body,
+    getDraftDocs: () => Array.from(draftFiles.values()).map(d => ({
+      path: d.path,
+      kind: d.kind,
+      title: d.meta.title || d.path,
+      content: serializeMarkdownFile(d.meta, d.body, d.kind),
+    })),
     applyBodyChange: (nextBody, opts) => {
       state.body = nextBody
       bodyTextarea.value = nextBody
@@ -1216,6 +1262,8 @@ export function initAdminApp(): void {
   modeBadgeBtn.addEventListener('click', () => openGitHubModal())
   saveBtn.addEventListener('click', () => void saveCurrentFile())
   newPostOpenBtn.addEventListener('click', () => openNewPostModal())
+  globalMediaLibraryBtn.addEventListener('click', () => void mediaUI?.openMediaLibrary())
+  emptyMediaLibraryBtn.addEventListener('click', () => void mediaUI?.openMediaLibrary())
 
   searchInput.addEventListener('input', () => {
     state.searchQuery = searchInput.value
@@ -1336,10 +1384,15 @@ export function initAdminApp(): void {
   insertGalleryBtn.addEventListener('click', () => wrapOrInsertImageContainer('gallery'))
   uploadImgInput.addEventListener('change', async () => {
     if (uploadImgInput.files && uploadImgInput.files.length > 0) {
-      const uploadedPaths = await uploadFilesToLibrary(uploadImgInput.files)
+      const summary = await uploadFilesToLibrary(uploadImgInput.files)
       uploadImgInput.value = ''
-      if (uploadedPaths.length > 0) {
-        await mediaUI?.openMediaLibrary({ preselectPaths: uploadedPaths })
+      if (summary.repoPaths.length > 0) {
+        const auditNote = summary.duplicateMatches.length > 0
+          ? (summary.newCount > 0
+              ? `上传完成：新增 ${summary.newCount} 张；另有 ${summary.duplicateMatches.length} 张重复图片已去重复用（${summary.duplicateMatches.map(d => d.existingName).join('、')}）`
+              : `上传去重校验：检测到与已有素材内容一致（${summary.duplicateMatches.map(d => d.existingName).join('、')}），未重复保存，已为你自动选中`)
+          : ''
+        await mediaUI?.openMediaLibrary({ preselectPaths: summary.repoPaths, auditNote })
       }
     }
   })

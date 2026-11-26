@@ -23,6 +23,9 @@ export interface ImageUploadResult {
   repoPath: string
   markdownPath: string
   previewUrl: string
+  hash?: string
+  deduplicated?: boolean
+  duplicateOf?: string
   pending?: boolean
 }
 
@@ -32,7 +35,15 @@ export interface AdminMediaItem {
   size: number
   mtimeMs?: number
   previewUrl: string
+  hash?: string
   pending?: boolean
+}
+
+export interface AdminDocContent {
+  path: string
+  kind: ContentKind
+  title: string
+  content: string
 }
 
 export interface GitHubConfig {
@@ -55,6 +66,9 @@ export interface StorageAdapter {
   uploadImage: (file: File, postPath: string) => Promise<ImageUploadResult>
   listMedia: () => Promise<AdminMediaItem[]>
   deleteMedia: (repoPath: string) => Promise<void>
+  deleteMediaBatch?: (repoPaths: string[]) => Promise<void>
+  commitPendingUploads?: () => Promise<number>
+  listDocumentContents?: () => Promise<AdminDocContent[]>
   resolveImagePreviewUrl: (src: string, postPath: string) => Promise<string | null>
   formatBody?: (body: string) => Promise<string>
   getPendingUploadCount?: () => number
@@ -140,6 +154,20 @@ function base64ToBytes(b64: string): Uint8Array {
 
 function base64ToUtf8(b64: string): string {
   return new TextDecoder('utf-8').decode(base64ToBytes(b64))
+}
+
+export async function computeGitBlobSha1(bytes: Uint8Array): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    return ''
+  }
+  const header = new TextEncoder().encode(`blob ${bytes.byteLength}\0`)
+  const payload = new Uint8Array(header.length + bytes.byteLength)
+  payload.set(header, 0)
+  payload.set(bytes, header.length)
+  const digest = await globalThis.crypto.subtle.digest('SHA-1', payload)
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -333,6 +361,9 @@ export class LocalStorageAdapter implements StorageAdapter {
       repoPath?: string
       markdownPath?: string
       previewUrl?: string
+      hash?: string
+      deduplicated?: boolean
+      duplicateOf?: string
     }
     if (!res.ok || !data.ok || !data.repoPath || !data.markdownPath || !data.previewUrl) {
       throw new Error(data.error || '图片上传失败')
@@ -341,6 +372,9 @@ export class LocalStorageAdapter implements StorageAdapter {
       repoPath: data.repoPath,
       markdownPath: data.markdownPath,
       previewUrl: data.previewUrl,
+      hash: data.hash,
+      deduplicated: Boolean(data.deduplicated),
+      duplicateOf: data.duplicateOf,
       pending: false,
     }
   }
@@ -358,6 +392,19 @@ export class LocalStorageAdapter implements StorageAdapter {
     return data.items
   }
 
+  async listDocumentContents(): Promise<AdminDocContent[]> {
+    const res = await fetch('/__admin_api/media-docs', { cache: 'no-store' })
+    const data = await res.json() as {
+      ok: boolean
+      error?: string
+      docs?: AdminDocContent[]
+    }
+    if (!res.ok || !data.ok || !data.docs) {
+      throw new Error(data.error || '加载全站文章引用信息失败')
+    }
+    return data.docs
+  }
+
   async deleteMedia(repoPath: string): Promise<void> {
     const res = await fetch(`/__admin_api/media?path=${encodeURIComponent(repoPath)}`, {
       method: 'DELETE',
@@ -365,6 +412,21 @@ export class LocalStorageAdapter implements StorageAdapter {
     const data = await res.json() as { ok: boolean, error?: string }
     if (!res.ok || !data.ok) {
       throw new Error(data.error || '删除图片文件失败')
+    }
+  }
+
+  async deleteMediaBatch(repoPaths: string[]): Promise<void> {
+    if (repoPaths.length === 0) {
+      return
+    }
+    const res = await fetch('/__admin_api/media-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: repoPaths }),
+    })
+    const data = await res.json() as { ok: boolean, error?: string }
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || '批量删除图片文件失败')
     }
   }
 
@@ -396,6 +458,7 @@ interface PendingGitHubUpload {
   repoPath: string
   filename: string
   size: number
+  hash: string
   base64Data: string
   previewUrl: string
 }
@@ -407,6 +470,7 @@ export class GitHubStorageAdapter implements StorageAdapter {
   private fileContentCache = new Map<string, { content: string, sha: string }>()
   private mediaUrlCache = new Map<string, string>()
   private pendingUploads = new Map<string, PendingGitHubUpload>()
+  private remoteMediaCache: AdminMediaItem[] | null = null
   private uploadSeq = 0
 
   constructor(config: GitHubConfig) {
@@ -732,11 +796,46 @@ export class GitHubStorageAdapter implements StorageAdapter {
     const shaMap = await this.commitAtomic(writes, deletes, commitMsg)
 
     this.pendingUploads.clear()
+    this.remoteMediaCache = null
 
     return {
       path: filePath,
       sha: shaMap.get(filePath),
     }
+  }
+
+  async commitPendingUploads(): Promise<number> {
+    if (this.pendingUploads.size === 0) {
+      return 0
+    }
+    const entries = Array.from(this.pendingUploads.values())
+    const writes = entries.map(item => ({
+      path: item.repoPath,
+      base64Content: item.base64Data,
+    }))
+    await this.commitAtomic(writes, [], `assets: upload ${entries.length} image(s)`)
+    this.pendingUploads.clear()
+    this.remoteMediaCache = null
+    return entries.length
+  }
+
+  async listDocumentContents(): Promise<AdminDocContent[]> {
+    if (this.fileContentCache.size === 0) {
+      await this.listFiles()
+    }
+    const docs: AdminDocContent[] = []
+    for (const [docPath, cached] of this.fileContentCache.entries()) {
+      const kind = getKindFromPath(docPath)
+      const parsed = parseMarkdownFile(cached.content, kind)
+      const fallbackTitle = docPath.split('/').pop()?.replace(/\.(?:md|mdx)$/i, '') || docPath
+      docs.push({
+        path: docPath,
+        kind,
+        title: parsed.meta.title || fallbackTitle,
+        content: cached.content,
+      })
+    }
+    return docs
   }
 
   async deleteFile(filePath: string, opts?: { commitMessage?: string }): Promise<void> {
@@ -763,52 +862,7 @@ export class GitHubStorageAdapter implements StorageAdapter {
     this.fileContentCache.delete(filePath)
   }
 
-  async uploadImage(file: File, postPath: string): Promise<ImageUploadResult> {
-    const optimized = await optimizeImageBeforeUpload(file)
-    if (optimized.size === 0 || optimized.size > 10 * 1024 * 1024) {
-      throw new Error('图片大小需在 1B 到 10MB 之间')
-    }
-
-    const extMatch = (optimized.name || '').match(/\.(png|jpg|jpeg|webp|gif|svg|avif)$/i)
-    const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '.png'
-    const rawStem = (optimized.name || 'image').replace(/\.[^.]+$/, '')
-    const stem = rawStem
-      .replace(/[^\w\u4E00-\u9FA5-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 48) || 'img'
-
-    this.uploadSeq += 1
-    const uniqueName = `${stem}-${Date.now().toString(36)}${this.uploadSeq.toString(36)}${ext}`
-    const repoPath = `src/content/posts/_images/${uniqueName}`
-    const base64Data = await fileToBase64(optimized)
-    const previewUrl = URL.createObjectURL(optimized)
-
-    this.mediaUrlCache.set(repoPath, previewUrl)
-    this.pendingUploads.set(repoPath, {
-      repoPath,
-      filename: uniqueName,
-      size: optimized.size,
-      base64Data,
-      previewUrl,
-    })
-
-    return {
-      repoPath,
-      markdownPath: computeRelativeImagePath(postPath, repoPath),
-      previewUrl,
-      pending: true,
-    }
-  }
-
-  async listMedia(): Promise<AdminMediaItem[]> {
-    const pendingItems: AdminMediaItem[] = Array.from(this.pendingUploads.values()).map(item => ({
-      repoPath: item.repoPath,
-      filename: item.filename,
-      size: item.size,
-      previewUrl: item.previewUrl,
-      pending: true,
-    }))
-
+  private async listRemoteMediaOnly(): Promise<AdminMediaItem[]> {
     const ref = encodeURIComponent(this.config.branch)
     let remoteItems: AdminMediaItem[] = []
     try {
@@ -829,52 +883,159 @@ export class GitHubStorageAdapter implements StorageAdapter {
             filename: item.name,
             size: item.size,
             previewUrl: this.mediaUrlCache.get(item.path) || '',
+            hash: item.sha,
             pending: false,
           }
         })
+      this.remoteMediaCache = remoteItems
     }
     catch (err) {
       if (!(err instanceof Error && err.message.includes('(404)'))) {
         throw err
       }
+      this.remoteMediaCache = []
+    }
+    return remoteItems
+  }
+
+  async uploadImage(file: File, postPath: string): Promise<ImageUploadResult> {
+    const optimized = await optimizeImageBeforeUpload(file)
+    if (optimized.size === 0 || optimized.size > 10 * 1024 * 1024) {
+      throw new Error('图片大小需在 1B 到 10MB 之间')
     }
 
+    const bytes = new Uint8Array(await optimized.arrayBuffer())
+    const hash = await computeGitBlobSha1(bytes)
+
+    if (hash) {
+      for (const pending of this.pendingUploads.values()) {
+        if (pending.hash && pending.hash === hash) {
+          return {
+            repoPath: pending.repoPath,
+            markdownPath: computeRelativeImagePath(postPath, pending.repoPath),
+            previewUrl: pending.previewUrl,
+            hash,
+            deduplicated: true,
+            duplicateOf: pending.filename,
+            pending: true,
+          }
+        }
+      }
+
+      const remoteList = this.remoteMediaCache ?? await this.listRemoteMediaOnly()
+      const remoteMatch = remoteList.find(item => item.hash && item.hash === hash)
+      if (remoteMatch) {
+        return {
+          repoPath: remoteMatch.repoPath,
+          markdownPath: computeRelativeImagePath(postPath, remoteMatch.repoPath),
+          previewUrl: remoteMatch.previewUrl,
+          hash,
+          deduplicated: true,
+          duplicateOf: remoteMatch.filename,
+          pending: false,
+        }
+      }
+    }
+
+    const extMatch = (optimized.name || '').match(/\.(png|jpg|jpeg|webp|gif|svg|avif)$/i)
+    const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '.png'
+    const rawStem = (optimized.name || 'image').replace(/\.[^.]+$/, '')
+    const stem = rawStem
+      .replace(/[^\w\u4E00-\u9FA5-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48) || 'img'
+
+    this.uploadSeq += 1
+    const uniqueName = `${stem}-${Date.now().toString(36)}${this.uploadSeq.toString(36)}${ext}`
+    const repoPath = `src/content/posts/_images/${uniqueName}`
+    const base64Data = bytesToBase64(bytes)
+    const previewUrl = URL.createObjectURL(optimized)
+
+    this.mediaUrlCache.set(repoPath, previewUrl)
+    this.pendingUploads.set(repoPath, {
+      repoPath,
+      filename: uniqueName,
+      size: optimized.size,
+      hash,
+      base64Data,
+      previewUrl,
+    })
+
+    return {
+      repoPath,
+      markdownPath: computeRelativeImagePath(postPath, repoPath),
+      previewUrl,
+      hash,
+      deduplicated: false,
+      pending: true,
+    }
+  }
+
+  async listMedia(): Promise<AdminMediaItem[]> {
+    const pendingItems: AdminMediaItem[] = Array.from(this.pendingUploads.values()).map(item => ({
+      repoPath: item.repoPath,
+      filename: item.filename,
+      size: item.size,
+      previewUrl: item.previewUrl,
+      hash: item.hash,
+      pending: true,
+    }))
+
+    const remoteItems = await this.listRemoteMediaOnly()
     const seen = new Set(pendingItems.map(i => i.repoPath))
     return [...pendingItems, ...remoteItems.filter(i => !seen.has(i.repoPath))]
   }
 
   async deleteMedia(repoPath: string): Promise<void> {
-    if (!repoPath.startsWith('src/content/posts/_images/')) {
-      throw new Error('仅允许删除 src/content/posts/_images/ 下的图片资源')
+    await this.deleteMediaBatch([repoPath])
+  }
+
+  async deleteMediaBatch(repoPaths: string[]): Promise<void> {
+    const uniquePaths = Array.from(new Set(repoPaths))
+    if (uniquePaths.length === 0) {
+      return
+    }
+    for (const repoPath of uniquePaths) {
+      if (!repoPath.startsWith('src/content/posts/_images/')) {
+        throw new Error(`仅允许删除 src/content/posts/_images/ 下的图片资源: ${repoPath}`)
+      }
     }
 
-    const pendingItem = this.pendingUploads.get(repoPath)
-    if (pendingItem) {
-      URL.revokeObjectURL(pendingItem.previewUrl)
-      this.pendingUploads.delete(repoPath)
-      this.mediaUrlCache.delete(repoPath)
+    const remoteCandidates: string[] = []
+    for (const repoPath of uniquePaths) {
+      const pendingItem = this.pendingUploads.get(repoPath)
+      if (pendingItem) {
+        URL.revokeObjectURL(pendingItem.previewUrl)
+        this.pendingUploads.delete(repoPath)
+        this.mediaUrlCache.delete(repoPath)
+      }
+      else {
+        remoteCandidates.push(repoPath)
+      }
+    }
+
+    if (remoteCandidates.length === 0) {
       return
     }
 
-    const sha = await this.getRemoteShaIfExists(repoPath)
-    if (!sha) {
-      throw new Error(`未找到远端图片 SHA: ${repoPath}`)
+    const remoteList = await this.listRemoteMediaOnly()
+    const remoteSet = new Set(remoteList.map(i => i.repoPath))
+    const existingDeletes = remoteCandidates.filter(p => remoteSet.has(p))
+    if (existingDeletes.length > 0) {
+      const commitMsg = existingDeletes.length === 1
+        ? `assets: delete ${existingDeletes[0]}`
+        : `assets: delete ${existingDeletes.length} images`
+      await this.commitAtomic([], existingDeletes, commitMsg)
     }
-    const encoded = this.encodeRepoPath(repoPath)
-    await this.request(`/contents/${encoded}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: `assets: delete ${repoPath}`,
-        sha,
-        branch: this.config.branch,
-      }),
-    })
-    this.shaCache.delete(repoPath)
-    const oldBlob = this.mediaUrlCache.get(repoPath)
-    if (oldBlob) {
-      URL.revokeObjectURL(oldBlob)
-      this.mediaUrlCache.delete(repoPath)
+
+    this.remoteMediaCache = null
+    for (const repoPath of remoteCandidates) {
+      this.shaCache.delete(repoPath)
+      const oldBlob = this.mediaUrlCache.get(repoPath)
+      if (oldBlob) {
+        URL.revokeObjectURL(oldBlob)
+        this.mediaUrlCache.delete(repoPath)
+      }
     }
   }
 

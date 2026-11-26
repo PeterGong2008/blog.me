@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -230,6 +231,14 @@ interface MediaEntry {
   size: number
   mtimeMs: number
   previewUrl: string
+  hash: string
+}
+
+function computeGitBlobSha1(buf: Buffer): string {
+  return createHash('sha1')
+    .update(`blob ${buf.length}\0`)
+    .update(buf)
+    .digest('hex')
 }
 
 async function scanMediaFiles(
@@ -258,7 +267,10 @@ async function scanMediaFiles(
     if (!(ext in ALLOWED_IMAGE_MIME)) {
       continue
     }
-    const stat = await fs.stat(fullPath)
+    const [stat, data] = await Promise.all([
+      fs.stat(fullPath),
+      fs.readFile(fullPath),
+    ])
     const repoPath = path.relative(cwd, fullPath).replace(/\\/g, '/')
     out.push({
       repoPath,
@@ -266,6 +278,70 @@ async function scanMediaFiles(
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       previewUrl: `${API_PREFIX}media?path=${encodeURIComponent(repoPath)}`,
+      hash: computeGitBlobSha1(data),
+    })
+  }
+}
+
+interface LocalDocEntry {
+  path: string
+  kind: 'post' | 'about'
+  title: string
+  content: string
+}
+
+function extractFrontmatterTitle(raw: string, fallbackPath: string): string {
+  const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (fmMatch) {
+    const titleLine = fmMatch[1].split(/\r?\n/).find(line => line.startsWith('title:'))
+    if (titleLine) {
+      let val = titleLine.slice('title:'.length).trim()
+      if ((val.startsWith('\'') && val.endsWith('\'')) || (val.startsWith('"') && val.endsWith('"'))) {
+        val = val.slice(1, -1)
+      }
+      if (val) {
+        return val
+      }
+    }
+  }
+  return path.basename(fallbackPath).replace(/\.(?:md|mdx)$/i, '')
+}
+
+async function scanAllDocumentContents(
+  dirAbs: string,
+  kind: 'post' | 'about',
+  cwd: string,
+  out: LocalDocEntry[],
+) {
+  let entries
+  try {
+    entries = await fs.readdir(dirAbs, { withFileTypes: true })
+  }
+  catch {
+    return
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dirAbs, entry.name)
+    if (entry.isDirectory()) {
+      if (kind === 'post' && entry.name === '_images') {
+        continue
+      }
+      await scanAllDocumentContents(fullPath, kind, cwd, out)
+      continue
+    }
+    if (!entry.isFile() || !/\.(?:md|mdx)$/i.test(entry.name)) {
+      continue
+    }
+    const content = await fs.readFile(fullPath, 'utf8')
+    const relPath = path.relative(cwd, fullPath).replace(/\\/g, '/')
+    out.push({
+      path: relPath,
+      kind,
+      title: kind === 'about'
+        ? (relPath.includes('-en') ? 'About (EN)' : '关于 (ZH)')
+        : extractFrontmatterTitle(content, relPath),
+      content,
     })
   }
 }
@@ -362,10 +438,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
 
     const { cwd, imagesRoot } = getRoots()
     await fs.mkdir(imagesRoot, { recursive: true })
-    const targetAbs = await findUniqueImagePath(imagesRoot, stem, ext)
-    await fs.writeFile(targetAbs, buffer)
 
-    const repoPath = path.relative(cwd, targetAbs).replace(/\\/g, '/')
     let validPostPath: string | undefined
     if (body.postPath) {
       try {
@@ -376,11 +449,35 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
       }
     }
 
+    const uploadHash = computeGitBlobSha1(buffer)
+    const existingItems: MediaEntry[] = []
+    await scanMediaFiles(imagesRoot, cwd, existingItems)
+    const matched = existingItems.find(item => item.size === buffer.length && item.hash === uploadHash)
+    if (matched) {
+      sendJson(res, 200, {
+        ok: true,
+        repoPath: matched.repoPath,
+        markdownPath: computeRelativePosix(validPostPath, matched.repoPath),
+        previewUrl: matched.previewUrl,
+        hash: uploadHash,
+        deduplicated: true,
+        duplicateOf: matched.filename,
+      })
+      return
+    }
+
+    const targetAbs = await findUniqueImagePath(imagesRoot, stem, ext)
+    await fs.writeFile(targetAbs, buffer)
+
+    const repoPath = path.relative(cwd, targetAbs).replace(/\\/g, '/')
+
     sendJson(res, 200, {
       ok: true,
       repoPath,
       markdownPath: computeRelativePosix(validPostPath, repoPath),
       previewUrl: `${API_PREFIX}media?path=${encodeURIComponent(repoPath)}`,
+      hash: uploadHash,
+      deduplicated: false,
     })
     return
   }
@@ -391,6 +488,17 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
     await scanMediaFiles(imagesRoot, cwd, items)
     items.sort((a, b) => b.mtimeMs - a.mtimeMs)
     sendJson(res, 200, { ok: true, items })
+    return
+  }
+
+  if (method === 'GET' && endpoint === 'media-docs') {
+    const { cwd, postsRoot, aboutRoot } = getRoots()
+    const docs: LocalDocEntry[] = []
+    await Promise.all([
+      scanAllDocumentContents(postsRoot, 'post', cwd, docs),
+      scanAllDocumentContents(aboutRoot, 'about', cwd, docs),
+    ])
+    sendJson(res, 200, { ok: true, docs })
     return
   }
 
@@ -422,6 +530,39 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse) {
     }
     await fs.unlink(info.abs)
     sendJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && endpoint === 'media-delete') {
+    const body = await readJsonBody<{ paths?: unknown }>(req, MAX_TEXT_BODY_BYTES)
+    if (!Array.isArray(body.paths) || body.paths.some(p => typeof p !== 'string')) {
+      sendError(res, 400, 'Expected paths array of strings')
+      return
+    }
+    const { imagesRoot } = getRoots()
+    const uniquePaths = Array.from(new Set(body.paths as string[]))
+    const resolvedTargets = uniquePaths.map((rawPath) => {
+      const info = resolveSafeContentPath(rawPath, false)
+      const ext = path.extname(info.abs).toLowerCase()
+      if (!isInsideDir(info.abs, imagesRoot) || !(ext in ALLOWED_IMAGE_MIME)) {
+        throw new Error(`Only image files under src/content/posts/_images/ can be deleted: ${rawPath}`)
+      }
+      return info
+    })
+
+    let deletedCount = 0
+    for (const info of resolvedTargets) {
+      try {
+        await fs.unlink(info.abs)
+        deletedCount += 1
+      }
+      catch (err) {
+        if (!(err instanceof Error && 'code' in err && (err as { code?: string }).code === 'ENOENT')) {
+          throw err
+        }
+      }
+    }
+    sendJson(res, 200, { ok: true, deletedCount })
     return
   }
 
